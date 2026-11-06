@@ -120,4 +120,4 @@ Compose grants the local application user database-wide privileges for initializ
 
 No frontend, Neo4j connection/synchronization, graph-path search, engine execution, bulk multi-game import, or custom-start/variant chess is implemented. PGNs are single-game, mainline-only, 1–1000 plies. Positions ignore clocks for board identity; game history remains in PGN/plies. See the [handoff](docs/HANDOFF.md) before building phase two.
 
-Feature slices use Conventional Commits. PDFs and local credentials are excluded from Git. Configure a GitHub remote separately.
+Feature slices use Conventional Commits. PDFs and local credentials are excluded from Git.

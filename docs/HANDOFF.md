@@ -33,7 +33,7 @@ Suggested model to finalize and document:
 - Neo4j schema, constraints/indexes, graph queries, integration and tests.
 - Final report with objectives/scope, original submitted diagrams, implemented data dictionary, important queries, architecture, actual test results, conclusion and future work.
 - Actual division of work: both students must contribute to database and application work. Do not claim responsibilities or commits on another person's behalf.
-- Individual Git commits and a GitHub remote/repository.
+- Individual contribution history for both teammates.
 - End-to-end demonstration of SQL plus NoSQL, role differences, rollback, and transposition queries.
 
 ## Known boundaries
