@@ -23,8 +23,11 @@ export function parseGame(pgn: string, requestedResult?: string) {
   if (requestedResult && headers.Result && headers.Result !== "*" && headers.Result !== requestedResult) throw new ApiError(400, "Result conflicts with PGN");
   if (board.isCheckmate() && result !== (board.turn() === "w" ? "0-1" : "1-0")) throw new ApiError(400, "Result conflicts with checkmate");
   if (board.isStalemate() && result !== "1/2-1/2") throw new ApiError(400, "Result conflicts with stalemate");
+  if (board.isInsufficientMaterial() && result !== "1/2-1/2") throw new ApiError(400, "Result conflicts with insufficient mating material");
   board.setHeader("Result", result);
-  return { result, pgn: board.pgn(), moves };
+  const normalizedPgn = board.pgn();
+  if (Buffer.byteLength(normalizedPgn, "utf8") > 65535) throw new ApiError(400, "Normalized PGN exceeds MySQL TEXT's 65535-byte limit");
+  return { result, pgn: normalizedPgn, moves };
 }
 
 export function legalSan(fen: string, san: string) {

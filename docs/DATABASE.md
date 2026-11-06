@@ -30,6 +30,7 @@ All submitted identifiers/FKs are unsigned INT; optional columns are represented
 - Canonical FEN normalizes clocks to `0 1` and removes irrelevant en-passant targets using chess.js. Side, pieces, castling rights and legally relevant en-passant availability still distinguish nodes. This is a board identity, **not** a complete state for fifty-move/repetition adjudication. Original game counters/history can be recovered from PGN and plies.
 - CHECKs strengthen the submitted schema without changing its domain entities. A unique repertoire-move constraint is installed with ALTER TABLE.
 - `app_user`: email, scrypt password hash, admin/analyst role, login failure/lockout state. These are application accounts, not public chess player identities.
+- Password hashes are versioned: original hashes remain readable and upgrade after successful login. No schema change or password reset is required. Deploy this local backend as one version; rollback builds must also understand `scrypt-v2`, since an older-only reader cannot verify upgraded hashes.
 - `api_session`: SHA-256 token hash, user FK, UTC expiry. Revocation deletes the session. User deletion cascades sessions only.
 - `evaluation_audit`: trigger-written JSON INSERT/DELETE snapshots, no FK to evaluation so deletion cannot erase its history. This is a demonstration audit of score changes, not a comprehensive user-attributed activity log.
 
@@ -80,12 +81,12 @@ The project demonstrates **five advanced categories** before counting Neo4j: tra
 
 ### Atomic import (`src/app/api/games/route.ts`, POST)
 
-1. Parse strict PGN and construct canonical from/to boards before starting a DB transaction.
-2. BEGIN; authenticate admin using the same connection.
+1. Acquire the connection inside the handler's error boundary; BEGIN and authenticate admin.
+2. Parse strict PGN, check its normalized UTF-8 byte length, and construct canonical from/to boards before any domain writes.
 3. Insert all distinct FENs in stable sorted order; duplicate boards reuse their existing row.
 4. Read node IDs with `FOR SHARE` (a current read, not a potentially stale repeatable-read snapshot).
 5. Insert game and all plies with prepared placeholders.
-6. COMMIT. Any FK, constraint, lock or unexpected failure → ROLLBACK; always release connection.
+6. COMMIT. Any FK, constraint, lock or unexpected failure → ROLLBACK; destroy the connection if rollback fails, and always release it. Connection-acquisition failures return a safe JSON error too.
 
 The rollback test deliberately uses a nonexistent opening after new position rows have been inserted, then verifies that all three table counts are unchanged. Deadlocks/timeouts return a conflict; callers can retry, rather than the server silently replaying a possibly committed request.
 

@@ -1,4 +1,4 @@
-import type { ProcedureCallPacket, RowDataPacket } from "mysql2/promise";
+import type { PoolConnection, ProcedureCallPacket, RowDataPacket } from "mysql2/promise";
 import { getPool } from "@/lib/db";
 import { authorize } from "@/lib/auth";
 import { errorResponse, found, id, json, pagination, type IdContext } from "@/lib/http";
@@ -6,8 +6,9 @@ import { errorResponse, found, id, json, pagination, type IdContext } from "@/li
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export async function GET(request: Request, context: IdContext) {
-  const connection = await getPool().getConnection();
+  let connection: PoolConnection | undefined;
   try {
+    connection = await getPool().getConnection();
     const playerId = id.parse((await context.params).id);
     const { limit, offset } = pagination(request);
     await connection.query("START TRANSACTION READ ONLY");
@@ -21,6 +22,8 @@ export async function GET(request: Request, context: IdContext) {
     );
     await connection.commit();
     return json({ summary, blunders });
-  } catch (error) { await connection.rollback(); return errorResponse(error); }
-  finally { connection.release(); }
+  } catch (error) {
+    if (connection) { try { await connection.rollback(); } catch { connection.destroy(); } }
+    return errorResponse(error);
+  } finally { connection?.release(); }
 }

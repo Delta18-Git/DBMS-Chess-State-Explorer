@@ -12,12 +12,12 @@ Base path: `/api`. Node.js runtime; JSON requests and responses. No API version 
 - IDs in JSON bodies must be positive integer numbers, not strings. IDs in paths/query strings are parsed and bounded to MySQL unsigned INT.
 - Optional database fields default to `null` on creation; PATCH preserves omitted fields. Explicit `null` clears nullable fields. Empty PATCH bodies are rejected.
 - Collections default to `limit=25&offset=0`, max limit 100, max offset 1,000,000. Detail game plies and repertoire lines are returned together with their parent, not paginated. Analytics player pagination applies to the `blunders` list, not the summary.
-- Dates: `YYYY-MM-DD`. Session timestamps use UTC. `COUNT`/`DECIMAL`/BIGINT outputs may be strings to avoid precision loss; frontend should parse display values deliberately.
+- Dates: `YYYY-MM-DD`, years 1000–9999 (MySQL DATE range). Session timestamps use UTC. `COUNT`/`DECIMAL`/BIGINT outputs may be strings to avoid precision loss; frontend should parse display values deliberately.
 - Responses containing data/errors set `Cache-Control: no-store`.
 
 | Status | Meaning |
 | --- | --- |
-| 400 | Invalid JSON, input, FEN/PGN/SAN, or database CHECK violation |
+| 400 | Invalid JSON/UTF-8, input, FEN/PGN/SAN, or database CHECK violation |
 | 401 | Missing/invalid/expired bearer token or wrong login credentials |
 | 403 | Authenticated but not admin |
 | 404 | Resource not found |
@@ -25,7 +25,7 @@ Base path: `/api`. Node.js runtime; JSON requests and responses. No API version 
 | 413 / 415 | Body too large / unsupported content type |
 | 422 | Foreign-key reference does not exist |
 | 429 | Login account locked after five failed attempts |
-| 500 / 503 | Unexpected failure / health reports DB unavailable or uninitialized |
+| 500 / 503 | Unexpected failure / database connection unavailable (health also detects uninitialized DB) |
 
 Unsupported HTTP methods are handled by Next.js (405).
 
@@ -37,7 +37,7 @@ Unsupported HTTP methods are handled by Next.js (405).
 { "email": "admin@example.com", "password": "your-password" }
 ```
 
-Returns `{ data: { token, expires_in: 43200, user: { user_id, email, role } } }`. Email is normalized to lowercase. Tokens are returned only at login; the database stores SHA-256 hashes, not raw tokens. Passwords use salted scrypt hashes. Five failed attempts lock the account for 15 minutes. Successful login resets failures; expired sessions are cleaned up on successful login.
+Returns `{ data: { token, expires_in: 43200, user: { user_id, email, role } } }`. Email is normalized to lowercase. Tokens are returned only at login; the database stores SHA-256 hashes, not raw tokens. New passwords use versioned salted scrypt hashes (`N=16384, r=8, p=5`). Original `scrypt:` hashes remain valid and upgrade atomically on successful login. Five failed attempts lock the account for 15 minutes. After expiry, the next failed attempt starts at one; successful login resets failures. Expired sessions are cleaned up on successful login.
 
 ### `GET /auth/me`
 
@@ -108,11 +108,11 @@ Optional `player_id` (either color), `opening_id`, `limit`, `offset`. Returns ga
 }
 ```
 
-Required: two distinct player IDs and `pgn`. Other metadata may be omitted or null. Optional `result`: `1-0`, `0-1`, `1/2-1/2`, `*`; defaults to the PGN result. Explicit result must agree with any decisive/drawn PGN result and with checkmate/stalemate. Resignations and agreed draws are valid without a terminal board.
+Required: two distinct player IDs and `pgn`. Other metadata may be omitted or null. Optional `result`: `1-0`, `0-1`, `1/2-1/2`, `*`; defaults to the PGN result. Explicit result must agree with any decisive/drawn PGN result and with checkmate/stalemate/insufficient material. Resignations and agreed draws are valid without a terminal board.
 
-Only standard-start, standard-chess, single-game main lines with 1–1000 legal plies are supported. PGN text is limited to 60,000 characters, and MySQL's TEXT byte limit also applies. Variations/comments may be parsed by chess.js, but only mainline moves become ply rows. The normalized PGN stores the authoritative result. API player/opening/tournament IDs are authoritative; PGN header names do not provision records or determine opening classification.
+Only standard-start, standard-chess, single-game main lines with 1–1000 legal plies are supported. PGN input is limited to 60,000 characters; normalized UTF-8 output must also fit MySQL TEXT's 65,535-byte limit, including generated headers. Oversized output is rejected before domain writes. Variations/comments may be parsed by chess.js, but only mainline moves become ply rows. The normalized PGN stores the authoritative result. API player/opening/tournament IDs are authoritative; PGN header names do not provision records or determine opening classification.
 
-The handler parses chess moves, then begins a transaction, authorizes admin, upserts canonical positions, reads current position IDs, inserts the game, and inserts every ordered ply. Any failure rolls back **all** database changes.
+The handler begins a transaction and authorizes admin before parsing the PGN, then upserts canonical positions, reads current position IDs, inserts the game, and inserts every ordered ply. Any failure rolls back **all** database changes. Connections that fail rollback are destroyed rather than returned to the pool with an uncertain transaction state.
 
 Returns `{ data: { game_id, result, plies, positions } }`. `plies` and `positions` are counts; positions counts distinct nodes used in this game, not newly created rows. Duplicate PGN imports create distinct game records but reuse positions.
 

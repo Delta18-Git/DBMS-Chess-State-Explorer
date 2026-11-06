@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { RowDataPacket } from "mysql2/promise";
+import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { getPool } from "@/lib/db";
 import { authorize } from "@/lib/auth";
 import { body, errorResponse, found, id, json, type IdContext } from "@/lib/http";
@@ -7,8 +7,9 @@ import { body, errorResponse, found, id, json, type IdContext } from "@/lib/http
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export async function GET(request: Request, context: IdContext) {
-  const connection = await getPool().getConnection();
+  let connection: PoolConnection | undefined;
   try {
+    connection = await getPool().getConnection();
     const positionId = id.parse((await context.params).id);
     await connection.query("START TRANSACTION READ ONLY");
     await authorize(connection, request);
@@ -19,12 +20,15 @@ export async function GET(request: Request, context: IdContext) {
     const position = found(rows);
     await connection.commit();
     return json(position);
-  } catch (error) { await connection.rollback(); return errorResponse(error); }
-  finally { connection.release(); }
+  } catch (error) {
+    if (connection) { try { await connection.rollback(); } catch { connection.destroy(); } }
+    return errorResponse(error);
+  } finally { connection?.release(); }
 }
 export async function PATCH(request: Request, context: IdContext) {
-  const connection = await getPool().getConnection();
+  let connection: PoolConnection | undefined;
   try {
+    connection = await getPool().getConnection();
     const positionId = id.parse((await context.params).id);
     const input = z.object({ comment: z.string().max(10000).nullable() }).strict().parse(await body(request));
     await connection.beginTransaction();
@@ -34,12 +38,15 @@ export async function PATCH(request: Request, context: IdContext) {
     await connection.execute("UPDATE `position` SET comment = ? WHERE position_id = ?", [input.comment, positionId]);
     await connection.commit();
     return json({ ...position, comment: input.comment });
-  } catch (error) { await connection.rollback(); return errorResponse(error); }
-  finally { connection.release(); }
+  } catch (error) {
+    if (connection) { try { await connection.rollback(); } catch { connection.destroy(); } }
+    return errorResponse(error);
+  } finally { connection?.release(); }
 }
 export async function DELETE(request: Request, context: IdContext) {
-  const connection = await getPool().getConnection();
+  let connection: PoolConnection | undefined;
   try {
+    connection = await getPool().getConnection();
     const positionId = id.parse((await context.params).id);
     await connection.beginTransaction();
     await authorize(connection, request, "admin");
@@ -48,6 +55,8 @@ export async function DELETE(request: Request, context: IdContext) {
     await connection.execute("DELETE FROM `position` WHERE position_id = ?", [positionId]);
     await connection.commit();
     return json({ deleted: positionId });
-  } catch (error) { await connection.rollback(); return errorResponse(error); }
-  finally { connection.release(); }
+  } catch (error) {
+    if (connection) { try { await connection.rollback(); } catch { connection.destroy(); } }
+    return errorResponse(error);
+  } finally { connection?.release(); }
 }

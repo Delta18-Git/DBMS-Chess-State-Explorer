@@ -1,18 +1,26 @@
 import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
-import { promisify } from "node:util";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { ApiError } from "./http";
 
-const scrypt = promisify(scryptCallback);
+function deriveKey(password: string, salt: string, parallelism: number) {
+  return new Promise<Buffer>((resolve, reject) => {
+    scryptCallback(password, salt, 64, { N: 16384, r: 8, p: parallelism }, (error, key) => {
+      if (error) reject(error); else resolve(key);
+    });
+  });
+}
 export async function hashPassword(password: string) {
   const salt = randomBytes(16).toString("hex");
-  const hash = await scrypt(password, salt, 64) as Buffer;
-  return `scrypt:${salt}:${hash.toString("hex")}`;
+  // OWASP's N=2^14, r=8, p=5 profile keeps memory bounded at roughly 16 MiB per login.
+  const hash = await deriveKey(password, salt, 5);
+  return `scrypt-v2:${salt}:${hash.toString("hex")}`;
 }
 export async function verifyPassword(password: string, encoded: string) {
-  const [algorithm, salt, hex] = encoded.split(":");
-  if (algorithm !== "scrypt" || !/^[a-f0-9]{32}$/.test(salt ?? "") || !/^[a-f0-9]{128}$/.test(hex ?? "")) return false;
-  const candidate = await scrypt(password, salt, 64) as Buffer;
+  const parts = encoded.split(":");
+  const [algorithm, salt, hex] = parts;
+  if (parts.length !== 3 || !["scrypt", "scrypt-v2"].includes(algorithm) || !/^[a-f0-9]{32}$/.test(salt ?? "") || !/^[a-f0-9]{128}$/.test(hex ?? "")) return false;
+  // Accept the original profile so existing accounts can upgrade on successful login.
+  const candidate = await deriveKey(password, salt, algorithm === "scrypt-v2" ? 5 : 1);
   return timingSafeEqual(candidate, Buffer.from(hex, "hex"));
 }
 export function tokenHash(token: string) { return createHash("sha256").update(token).digest("hex"); }

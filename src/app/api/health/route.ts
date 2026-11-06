@@ -1,18 +1,20 @@
+import type { PoolConnection } from "mysql2/promise";
 import { getPool } from "@/lib/db";
-import { json } from "@/lib/http";
+import { ApiError, errorResponse, json } from "@/lib/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export async function GET() {
   // Liveness is public; do not reveal credentials, server versions or SQL errors.
+  let connection: PoolConnection | undefined;
   try {
-    const connection = await getPool().getConnection();
-    try {
-      await connection.query("START TRANSACTION READ ONLY");
-      await connection.query("SELECT 1 FROM player LIMIT 1");
-      await connection.commit();
-      return json({ status: "ok", database: "mysql" });
-    } catch (error) { await connection.rollback(); throw error; }
-    finally { connection.release(); }
-  } catch { return Response.json({ error: { message: "Database unavailable or uninitialized" } }, { status: 503 }); }
+    connection = await getPool().getConnection();
+    await connection.query("START TRANSACTION READ ONLY");
+    await connection.query("SELECT 1 FROM player LIMIT 1");
+    await connection.commit();
+    return json({ status: "ok", database: "mysql" });
+  } catch {
+    if (connection) { try { await connection.rollback(); } catch { connection.destroy(); } }
+    return errorResponse(new ApiError(503, "Database unavailable or uninitialized"));
+  } finally { connection?.release(); }
 }

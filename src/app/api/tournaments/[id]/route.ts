@@ -1,4 +1,4 @@
-import type { RowDataPacket } from "mysql2/promise";
+import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { getPool } from "@/lib/db";
 import { authorize } from "@/lib/auth";
 import { body, errorResponse, found, id, json, type IdContext } from "@/lib/http";
@@ -8,8 +8,9 @@ import type { TournamentRow } from "@/lib/rows";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export async function GET(request: Request, context: IdContext) {
-  const connection = await getPool().getConnection();
+  let connection: PoolConnection | undefined;
   try {
+    connection = await getPool().getConnection();
     const tournamentId = id.parse((await context.params).id);
     await connection.query("START TRANSACTION READ ONLY");
     await authorize(connection, request);
@@ -17,12 +18,15 @@ export async function GET(request: Request, context: IdContext) {
     const tournament = found(rows);
     await connection.commit();
     return json(tournament);
-  } catch (error) { await connection.rollback(); return errorResponse(error); }
-  finally { connection.release(); }
+  } catch (error) {
+    if (connection) { try { await connection.rollback(); } catch { connection.destroy(); } }
+    return errorResponse(error);
+  } finally { connection?.release(); }
 }
 export async function PATCH(request: Request, context: IdContext) {
-  const connection = await getPool().getConnection();
+  let connection: PoolConnection | undefined;
   try {
+    connection = await getPool().getConnection();
     const tournamentId = id.parse((await context.params).id);
     const patch = tournamentSchema.partial().refine(v => Object.keys(v).length > 0).parse(await body(request));
     await connection.beginTransaction();
@@ -32,12 +36,15 @@ export async function PATCH(request: Request, context: IdContext) {
     await connection.execute("UPDATE tournament SET name = ?, date = ?, location = ? WHERE tournament_id = ?", [t.name, t.date, t.location, tournamentId]);
     await connection.commit();
     return json(t);
-  } catch (error) { await connection.rollback(); return errorResponse(error); }
-  finally { connection.release(); }
+  } catch (error) {
+    if (connection) { try { await connection.rollback(); } catch { connection.destroy(); } }
+    return errorResponse(error);
+  } finally { connection?.release(); }
 }
 export async function DELETE(request: Request, context: IdContext) {
-  const connection = await getPool().getConnection();
+  let connection: PoolConnection | undefined;
   try {
+    connection = await getPool().getConnection();
     const tournamentId = id.parse((await context.params).id);
     await connection.beginTransaction();
     await authorize(connection, request, "admin");
@@ -46,6 +53,8 @@ export async function DELETE(request: Request, context: IdContext) {
     await connection.execute("DELETE FROM tournament WHERE tournament_id = ?", [tournamentId]);
     await connection.commit();
     return json({ deleted: tournamentId });
-  } catch (error) { await connection.rollback(); return errorResponse(error); }
-  finally { connection.release(); }
+  } catch (error) {
+    if (connection) { try { await connection.rollback(); } catch { connection.destroy(); } }
+    return errorResponse(error);
+  } finally { connection?.release(); }
 }

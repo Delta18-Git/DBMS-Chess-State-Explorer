@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { randomUUID, scryptSync } from "node:crypto";
 import mysql from "mysql2/promise";
 import { Chess } from "chess.js";
 import { dbOptions } from "../src/lib/db";
@@ -44,9 +44,13 @@ test("real MySQL and Next.js HTTP integration", { timeout: 120000 }, async t => 
   let white: any, black: any, opening: any, tournament: any, gameA: any, gameB: any, detailA: any, detailB: any;
   try {
     for (const role of ["admin", "analyst", "locked"] as const) {
+      const salt = "0123456789abcdef0123456789abcdef";
+      const passwordHash = role === "analyst"
+        ? `scrypt:${salt}:${scryptSync(password, salt, 64).toString("hex")}`
+        : await hashPassword(password);
       const [result] = await sql.execute<mysql.ResultSetHeader>(
         "INSERT INTO app_user (email, password_hash, role) VALUES (?, ?, ?)",
-        [`${prefix}-${role}@example.com`, await hashPassword(password), role === "admin" ? "admin" : "analyst"],
+        [`${prefix}-${role}@example.com`, passwordHash, role === "admin" ? "admin" : "analyst"],
       );
       tracked.user_id.push(result.insertId);
     }
@@ -66,9 +70,31 @@ test("real MySQL and Next.js HTTP integration", { timeout: 120000 }, async t => 
       assert.equal((await api("/players", "GET", undefined, analyst)).status, 200);
       assert.equal((await api("/players", "POST", { name: "Forbidden" }, analyst)).status, 403);
       const [users] = await sql.execute<mysql.RowDataPacket[]>("SELECT password_hash FROM app_user WHERE user_id = ?", [tracked.user_id[0]]);
-      assert.match(users[0].password_hash, /^scrypt:/);
+      assert.match(users[0].password_hash, /^scrypt-v2:/);
+      const [upgraded] = await sql.execute<mysql.RowDataPacket[]>("SELECT password_hash FROM app_user WHERE user_id = ?", [tracked.user_id[1]]);
+      assert.match(upgraded[0].password_hash, /^scrypt-v2:/, "Successful legacy login must upgrade its password hash");
       const [sessions] = await sql.execute<mysql.RowDataPacket[]>("SELECT token_hash FROM api_session WHERE user_id = ?", [tracked.user_id[0]]);
       assert.notEqual(sessions[0].token_hash, admin);
+    });
+    await t.test("expired lockouts reset the failure counter and successful login clears it", async () => {
+      await sql.execute("UPDATE app_user SET locked_until = '2000-01-01', failed_attempts = 5 WHERE user_id = ?", [tracked.user_id[2]]);
+      const email = `${prefix}-locked@example.com`;
+      assert.equal((await api("/auth/login", "POST", { email, password: "wrong" })).status, 401);
+      const [failed] = await sql.execute<mysql.RowDataPacket[]>("SELECT failed_attempts, locked_until FROM app_user WHERE user_id = ?", [tracked.user_id[2]]);
+      assert.equal(failed[0].failed_attempts, 1);
+      assert.equal(failed[0].locked_until, null);
+      assert.equal((await api("/auth/login", "POST", { email, password })).status, 200);
+      const [reset] = await sql.execute<mysql.RowDataPacket[]>("SELECT failed_attempts, locked_until FROM app_user WHERE user_id = ?", [tracked.user_id[2]]);
+      assert.equal(reset[0].failed_attempts, 0);
+      assert.equal(reset[0].locked_until, null);
+    });
+    await t.test("simultaneous logins for separate users do not conflict", async () => {
+      for (let round = 0; round < 3; round++) {
+        const results = await Promise.all(["admin", "analyst"].map(role =>
+          api("/auth/login", "POST", { email: `${prefix}-${role}@example.com`, password }),
+        ));
+        for (const result of results) assert.equal(result.status, 200, JSON.stringify(result));
+      }
     });
     await t.test("metadata CRUD, PATCH preservation, constraints and parameterized SQL", async () => {
       white = await create("/players", { name: `${prefix} White`, title: "GM", federation: "IND", rating: 2000 }, "player_id");
@@ -83,6 +109,7 @@ test("real MySQL and Next.js HTTP integration", { timeout: 120000 }, async t => 
       assert.equal((await api("/players/not-an-id")).status, 400);
       assert.equal((await api("/players/4294967295")).status, 404);
       assert.equal((await api("/players?limit=0")).status, 400);
+      assert.equal((await api("/tournaments", "POST", { name: "Invalid date", date: "0001-01-01" })).status, 400);
       const injection = await create("/players", { name: "Robert'); DROP TABLE player; --" }, "player_id");
       assert.equal((await api(`/players/${injection.player_id}`)).data.name, injection.name);
       assert.equal((await api(`/players/${injection.player_id}`, "DELETE")).status, 200);
@@ -117,6 +144,10 @@ test("real MySQL and Next.js HTTP integration", { timeout: 120000 }, async t => 
       assert.deepEqual(await counts(), before, "New positions must roll back when the game FK fails");
       assert.equal((await api("/games", "POST", { ...input, pgn: "1. e5 *" })).status, 400);
       assert.deepEqual(await counts(), before);
+      assert.equal((await api("/games", "POST", { ...input, pgn: "1. e5 *" }, "")).status, 401);
+      assert.equal((await api("/games", "POST", { ...input, pgn: "1. e5 *" }, analyst)).status, 403);
+      assert.equal((await api("/games", "POST", { ...input, pgn: `1. e4 {${"界".repeat(22000)}} e5 *` })).status, 400);
+      assert.deepEqual(await counts(), before, "Rejected UTF-8 PGN must not create any positions or games");
       assert.equal((await api(`/games/${gameA.game_id}`, "PATCH", { date: "2026-02-01" })).status, 200);
       assert.equal((await api(`/games/${gameA.game_id}`, "PATCH", { result: "0-1" })).status, 400);
       assert.equal((await api(`/players/${white.player_id}`, "DELETE")).status, 409);

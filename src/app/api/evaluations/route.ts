@@ -1,4 +1,4 @@
-import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { getPool } from "@/lib/db";
 import { authorize } from "@/lib/auth";
 import { body, errorResponse, id, json, pagination } from "@/lib/http";
@@ -7,8 +7,9 @@ import { evaluationSchema } from "@/lib/validation";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
-  const connection = await getPool().getConnection();
+  let connection: PoolConnection | undefined;
   try {
+    connection = await getPool().getConnection();
     const { limit, offset } = pagination(request);
     const params = new URL(request.url).searchParams;
     const positionId = params.has("position_id") ? id.parse(params.get("position_id")) : null;
@@ -20,12 +21,15 @@ export async function GET(request: Request) {
     );
     await connection.commit();
     return json(rows);
-  } catch (error) { await connection.rollback(); return errorResponse(error); }
-  finally { connection.release(); }
+  } catch (error) {
+    if (connection) { try { await connection.rollback(); } catch { connection.destroy(); } }
+    return errorResponse(error);
+  } finally { connection?.release(); }
 }
 export async function POST(request: Request) {
-  const connection = await getPool().getConnection();
+  let connection: PoolConnection | undefined;
   try {
+    connection = await getPool().getConnection();
     const e = evaluationSchema.parse(await body(request));
     await connection.beginTransaction();
     await authorize(connection, request, "admin");
@@ -33,6 +37,8 @@ export async function POST(request: Request) {
     // trg_evaluation_insert records a JSON snapshot atomically with this INSERT.
     await connection.commit();
     return json({ evaluation_id: result.insertId, ...e }, 201);
-  } catch (error) { await connection.rollback(); return errorResponse(error); }
-  finally { connection.release(); }
+  } catch (error) {
+    if (connection) { try { await connection.rollback(); } catch { connection.destroy(); } }
+    return errorResponse(error);
+  } finally { connection?.release(); }
 }

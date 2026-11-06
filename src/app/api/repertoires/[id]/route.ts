@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { RowDataPacket } from "mysql2/promise";
+import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { getPool } from "@/lib/db";
 import { authorize } from "@/lib/auth";
 import { body, errorResponse, found, id, json, type IdContext } from "@/lib/http";
@@ -7,8 +7,9 @@ import { body, errorResponse, found, id, json, type IdContext } from "@/lib/http
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export async function GET(request: Request, context: IdContext) {
-  const connection = await getPool().getConnection();
+  let connection: PoolConnection | undefined;
   try {
+    connection = await getPool().getConnection();
     const repertoireId = id.parse((await context.params).id);
     await connection.query("START TRANSACTION READ ONLY");
     await authorize(connection, request);
@@ -20,12 +21,15 @@ export async function GET(request: Request, context: IdContext) {
     );
     await connection.commit();
     return json({ ...repertoire, lines });
-  } catch (error) { await connection.rollback(); return errorResponse(error); }
-  finally { connection.release(); }
+  } catch (error) {
+    if (connection) { try { await connection.rollback(); } catch { connection.destroy(); } }
+    return errorResponse(error);
+  } finally { connection?.release(); }
 }
 export async function PATCH(request: Request, context: IdContext) {
-  const connection = await getPool().getConnection();
+  let connection: PoolConnection | undefined;
   try {
+    connection = await getPool().getConnection();
     const repertoireId = id.parse((await context.params).id);
     const input = z.object({ name: z.string().trim().min(1).max(100) }).strict().parse(await body(request));
     await connection.beginTransaction();
@@ -35,12 +39,15 @@ export async function PATCH(request: Request, context: IdContext) {
     await connection.execute("UPDATE repertoire SET name = ? WHERE repertoire_id = ?", [input.name, repertoireId]);
     await connection.commit();
     return json({ ...repertoire, name: input.name });
-  } catch (error) { await connection.rollback(); return errorResponse(error); }
-  finally { connection.release(); }
+  } catch (error) {
+    if (connection) { try { await connection.rollback(); } catch { connection.destroy(); } }
+    return errorResponse(error);
+  } finally { connection?.release(); }
 }
 export async function DELETE(request: Request, context: IdContext) {
-  const connection = await getPool().getConnection();
+  let connection: PoolConnection | undefined;
   try {
+    connection = await getPool().getConnection();
     const repertoireId = id.parse((await context.params).id);
     await connection.beginTransaction();
     await authorize(connection, request, "admin");
@@ -50,6 +57,8 @@ export async function DELETE(request: Request, context: IdContext) {
     await connection.execute("DELETE FROM repertoire WHERE repertoire_id = ?", [repertoireId]);
     await connection.commit();
     return json({ deleted: repertoireId });
-  } catch (error) { await connection.rollback(); return errorResponse(error); }
-  finally { connection.release(); }
+  } catch (error) {
+    if (connection) { try { await connection.rollback(); } catch { connection.destroy(); } }
+    return errorResponse(error);
+  } finally { connection?.release(); }
 }

@@ -21,6 +21,7 @@ export function errorResponse(error: unknown) {
     else if (code === "ER_NO_REFERENCED_ROW_2") { status = 422; message = "A referenced resource does not exist"; }
     else if (["ER_CHECK_CONSTRAINT_VIOLATED", "ER_WARN_DATA_OUT_OF_RANGE", "ER_DATA_TOO_LONG", "WARN_DATA_TRUNCATED"].includes(code ?? "")) { status = 400; message = "Database constraint rejected the input"; }
     else if (["ER_LOCK_DEADLOCK", "ER_LOCK_WAIT_TIMEOUT"].includes(code ?? "")) { status = 409; message = "Concurrent change; retry the request"; }
+    else if (["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EHOSTUNREACH", "ENOTFOUND", "PROTOCOL_CONNECTION_LOST", "ER_CON_COUNT_ERROR"].includes(code ?? "")) { status = 503; message = "Database temporarily unavailable"; }
     // Log only an error code/name: driver errors can contain SQL parameters or secrets.
     else console.error("API failure:", code ?? (error instanceof Error ? error.name : "unknown"));
   }
@@ -29,7 +30,7 @@ export function errorResponse(error: unknown) {
 
 export async function body(request: Request) {
   const type = request.headers.get("content-type") ?? "";
-  if (!type.toLowerCase().startsWith("application/json")) throw new ApiError(415, "Use application/json");
+  if (type.split(";", 1)[0].trim().toLowerCase() !== "application/json") throw new ApiError(415, "Use application/json");
   // Bound chunked requests too, rather than trusting Content-Length.
   const reader = request.body?.getReader();
   if (!reader) throw new ApiError(400, "JSON body required");
@@ -44,12 +45,15 @@ export async function body(request: Request) {
       chunks.push(value);
     }
   } finally { reader.releaseLock(); }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+  let text: string;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)); }
+  catch { throw new ApiError(400, "Body must be valid UTF-8"); }
+  return JSON.parse(text) as unknown;
 }
 
 export const id = z.coerce.number().int().positive().max(4294967295);
 export const foreignId = z.number().int().positive().max(4294967295);
-export const date = z.iso.date();
+export const date = z.iso.date().refine(value => value >= "1000-01-01", { message: "Date must be within MySQL's 1000–9999 year range" });
 export const pageSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(25),
   offset: z.coerce.number().int().min(0).max(1000000).default(0),

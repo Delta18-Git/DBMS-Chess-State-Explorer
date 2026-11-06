@@ -12,7 +12,7 @@ Backend-first implementation of `Submission1.pdf`, following `DBMS Level 3 Mini_
 - Legal standard-chess PGN ingestion, atomic position deduplication, ordered plies, and safe game deletion.
 - Players, tournaments, openings, positions, evaluations, and repertoires APIs.
 - Opening results, player win/loss and centipawn-loss/blunder statistics, one-step position explorer.
-- Two roles: **admin** reads/writes; **analyst** reads only. Salted scrypt passwords, hashed expiring/revocable bearer tokens, database-backed login lockout.
+- Two roles: **admin** reads/writes; **analyst** reads only. Versioned scrypt passwords, hashed expiring/revocable bearer tokens, database-backed login lockout.
 - Transactions, views/window functions, stored procedure/subqueries, triggers, and indexes; integration tests use real MySQL and HTTP.
 
 **Strict API structure:** every exported handler in `src/app/api/**/route.ts` owns its SQL and its explicit `BEGIN`/`START TRANSACTION READ ONLY`, `COMMIT`, `ROLLBACK`, and connection release. Shared files supply only connection pooling, authentication, validation, chess parsing, and response formatting. There is no repository/service/transaction wrapper hiding domain database operations. A test enforces local transaction boundaries in every handler.
@@ -96,7 +96,7 @@ npm run start -- --hostname 127.0.0.1 --port 3100
 INTEGRATION_TESTS=1 TEST_BASE_URL=http://127.0.0.1:3100 npm run test:integration
 ```
 
-Tests cover authentication/lockout, role permissions, CRUD, PATCH preservation, SQL-injection input, FK/CHECK/UNIQUE constraints, legal PGN/SAN, transposition deduplication, rollback **after position writes**, deterministic evaluation selection, NULL scores, both-color blunders, views/procedure/triggers, analytics, logout/expiry, and safe DDL demonstration. Decimal aggregates can be JSON strings (MySQL preserves precision).
+Tests cover authentication/lockout recovery, legacy password-hash upgrades, simultaneous logins, role permissions, CRUD, PATCH preservation, SQL-injection input, FK/CHECK/UNIQUE constraints, legal PGN/SAN, transposition deduplication, concurrent imports, rollback **after position writes**, deterministic evaluation selection, NULL scores, both-color blunders, views/procedure/triggers, analytics, logout/expiry, and safe DDL demonstration. Unit tests exercise every API handler's connection-failure path and check failed-rollback cleanup, strict JSON/UTF-8, MySQL date bounds and PGN byte limits. Decimal aggregates can be JSON strings (MySQL preserves precision).
 
 ## Project layout
 
@@ -120,4 +120,4 @@ Compose grants the local application user database-wide privileges for initializ
 
 No frontend, Neo4j connection/synchronization, graph-path search, engine execution, bulk multi-game import, or custom-start/variant chess is implemented. PGNs are single-game, mainline-only, 1–1000 plies. Positions ignore clocks for board identity; game history remains in PGN/plies. See the [handoff](docs/HANDOFF.md) before building phase two.
 
-Git is initialized without fabricated commits or authorship. Each teammate should commit their own work and record their actual contributions; configure a GitHub remote separately.
+Feature slices use Conventional Commits. PDFs and local credentials are excluded from Git. Configure a GitHub remote separately.

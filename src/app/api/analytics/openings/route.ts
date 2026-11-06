@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { RowDataPacket } from "mysql2/promise";
+import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { getPool } from "@/lib/db";
 import { authorize } from "@/lib/auth";
 import { errorResponse, json, pagination } from "@/lib/http";
@@ -7,8 +7,9 @@ import { errorResponse, json, pagination } from "@/lib/http";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
-  const connection = await getPool().getConnection();
+  let connection: PoolConnection | undefined;
   try {
+    connection = await getPool().getConnection();
     const { limit, offset } = pagination(request);
     const params = new URL(request.url).searchParams;
     const minGames = z.coerce.number().int().min(1).max(1000000).parse(params.get("min_games") ?? 1);
@@ -27,6 +28,8 @@ export async function GET(request: Request) {
     );
     await connection.commit();
     return json(rows);
-  } catch (error) { await connection.rollback(); return errorResponse(error); }
-  finally { connection.release(); }
+  } catch (error) {
+    if (connection) { try { await connection.rollback(); } catch { connection.destroy(); } }
+    return errorResponse(error);
+  } finally { connection?.release(); }
 }
