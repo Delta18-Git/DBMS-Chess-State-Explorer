@@ -1,0 +1,23 @@
+services:
+  mysql:
+    image: mysql:8.4
+    # Local teaching database: allow CREATE TRIGGER with binary logging enabled.
+    command: ["--log-bin-trust-function-creators=1"]
+    restart: unless-stopped
+    env_file: .env.local
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:-chess_intel}
+      MYSQL_USER: ${DB_USER:-chess_app}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env.local}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env.local}
+    ports:
+      - "127.0.0.1:${DB_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+volumes:
+  mysql_data:
