@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import mysql from "mysql2/promise";
 import { dbOptions } from "../src/lib/db";
+import { migrate } from "./migrate-db";
 
 async function main() {
   const connection = await mysql.createConnection({ ...dbOptions(), multipleStatements: true });
@@ -14,7 +15,8 @@ async function main() {
       await connection.query(await readFile(new URL("../database/seed.sql", import.meta.url), "utf8"));
       await connection.commit();
     } catch (error) { await connection.rollback(); throw error; }
-    console.log("Schema, views, procedure, triggers and sample metadata initialized.");
+    const ran = await migrate(connection);
+    console.log(`Schema, views, procedure, triggers and sample metadata initialized; migrations: ${ran.join(", ") || "none"}.`);
   } finally { await connection.end(); }
 }
 main().catch(error => { console.error(error instanceof Error ? error.message : "Initialization failed"); process.exitCode = 1; });
