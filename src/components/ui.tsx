@@ -56,7 +56,7 @@ export function ResultLegend() {
 }
 
 export function Db({ kind }: { kind: "MySQL" | "Neo4j" }) {
-  return <span className="db-tag" title={`Served by ${kind}`}>{kind}</span>;
+  return <span className={`db-tag db-${kind.toLowerCase()}`} title={`Served by ${kind}`}>{kind}</span>;
 }
 
 export function Empty({ children }: { children: ReactNode }) {
