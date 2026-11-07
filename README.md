@@ -35,7 +35,7 @@ npm run setup      # first time only, ~12 minutes: databases, schema, accounts, 
 npm run dev        # http://localhost:3000
 ```
 
-`npm run setup` writes `.env.local` with random passwords if it is missing, starts the `chess-mysql` and `chess-neo4j` containers, and creates the schema (or applies new migrations). It creates an admin and an analyst account (passwords are printed once and saved to `~/.config/chess-state-explorer/accounts.txt`, never in the repo), then loads everything above. It is safe to re-run. `npm run dev` restarts the containers by itself.
+`npm run setup` writes `.env.local` with random passwords if it is missing, starts the `chess-mysql` and `chess-neo4j` containers, and creates the schema (or applies new migrations). It creates an admin and an analyst account (names, emails and passwords can be set with `ADMIN_*` / `ANALYST_*` variables, see `.env.example`; otherwise passwords are random, printed once and saved to `~/.config/chess-state-explorer/accounts.txt`, never in the repo), then loads everything above. More accounts are added from the Admin page. It is safe to re-run. `npm run dev` restarts the containers by itself.
 
 Other commands: `npm run setup -- down | status` (containers), `npm test` (unit), `npm run build`. The integration tests are described in [docs/TESTING.md](docs/TESTING.md).
 
