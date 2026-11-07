@@ -11,16 +11,25 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/unit.test.ts",
-    "test:integration": "node --env-file-if-exists=.env.local --import tsx --test tests/integration.test.ts",
+    "test:integration": "node --env-file-if-exists=.env.local --import tsx --test --test-concurrency=1 tests/integration.test.ts tests/graph.integration.test.ts",
     "db:init": "node --env-file-if-exists=.env.local --import tsx scripts/init-db.ts",
+    "db:migrate": "node --env-file-if-exists=.env.local --import tsx scripts/migrate-db.ts",
+    "db:up": "scripts/dev-db.sh up",
+    "db:down": "scripts/dev-db.sh down",
+    "graph:sync": "node --env-file-if-exists=.env.local --import tsx scripts/graph-sync.ts",
+    "graph:rebuild": "node --env-file-if-exists=.env.local --import tsx scripts/graph-sync.ts --rebuild",
+    "data:load": "node --env-file-if-exists=.env.local --import tsx scripts/load-sample-data.ts",
     "user:create": "node --env-file-if-exists=.env.local --import tsx scripts/create-user.ts"
   },
   "dependencies": {
     "chess.js": "^1.4.0",
     "mysql2": "^3.24.6",
+    "neo4j-driver": "^6.3.0",
     "next": "^16.4.5",
     "react": "^19.3.1",
+    "react-chessboard": "^5.12.1",
     "react-dom": "^19.3.1",
+    "server-only": "^0.0.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {
