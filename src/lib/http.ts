@@ -22,6 +22,8 @@ export function errorResponse(error: unknown) {
     else if (["ER_CHECK_CONSTRAINT_VIOLATED", "ER_WARN_DATA_OUT_OF_RANGE", "ER_DATA_TOO_LONG", "WARN_DATA_TRUNCATED"].includes(code ?? "")) { status = 400; message = "Database constraint rejected the input"; }
     else if (["ER_LOCK_DEADLOCK", "ER_LOCK_WAIT_TIMEOUT"].includes(code ?? "")) { status = 409; message = "Concurrent change; retry the request"; }
     else if (["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EHOSTUNREACH", "ENOTFOUND", "PROTOCOL_CONNECTION_LOST", "ER_CON_COUNT_ERROR"].includes(code ?? "")) { status = 503; message = "Database temporarily unavailable"; }
+    // Neo4j driver: unreachable server, expired routing, or bad graph credentials.
+    else if (["ServiceUnavailable", "SessionExpired"].includes(code ?? "") || code?.startsWith("Neo.ClientError.Security.")) { status = 503; message = "Graph database temporarily unavailable"; }
     // Log only an error code/name: driver errors can contain SQL parameters or secrets.
     else console.error("API failure:", code ?? (error instanceof Error ? error.name : "unknown"));
   }
