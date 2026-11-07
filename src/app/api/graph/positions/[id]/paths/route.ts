@@ -3,7 +3,7 @@ import { z } from "zod";
 import { getPool } from "@/lib/db";
 import { authorize } from "@/lib/auth";
 import { errorResponse, found, id, json, type IdContext } from "@/lib/http";
-import { int, readGraph } from "@/lib/graph";
+import { int, nodeFacts, readGraph, type GraphNode } from "@/lib/graph";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,20 +29,23 @@ export async function GET(request: Request, context: IdContext) {
         "MATCH (t:Position {position_id: $id}) RETURN t.is_start AS is_start",
         { id: int(positionId) },
       );
-      if (!target.records.length) return { in_graph: false, paths: [] };
-      if (target.records[0].get("is_start")) return { in_graph: true, paths: [{ depth: 0, moves: [], position_ids: [positionId], edge_games: [], played_by: [] }] };
+      if (!target.records.length) return { in_graph: false, paths: [], nodes: [] as GraphNode[] };
+      if (target.records[0].get("is_start")) return { in_graph: true, paths: [{ depth: 0, moves: [], position_ids: [positionId], edge_games: [], played_by: [] }], nodes: await nodeFacts(tx, [positionId]) };
       const paths = await tx.run(
         `MATCH (s:Position {is_start: true}), (t:Position {position_id: $id})
          MATCH p = allShortestPaths((s)-[:MOVE*..500]->(t))
-         WITH p, relationships(p) AS rs LIMIT $limit
+         WITH p, relationships(p) AS rs LIMIT 200
+         WITH p, rs, reduce(acc = head(rs).game_ids, r IN tail(rs) | [g IN acc WHERE g IN r.game_ids]) AS played_by
+         ORDER BY size(played_by) DESC, reduce(s = 0, r IN rs | s + r.games) DESC LIMIT $limit
          RETURN length(p) AS depth,
                 [r IN rs | r.san] AS moves,
                 [n IN nodes(p) | n.position_id] AS position_ids,
                 [r IN rs | r.games] AS edge_games,
-                reduce(acc = head(rs).game_ids, r IN tail(rs) | [g IN acc WHERE g IN r.game_ids]) AS played_by`,
+                played_by`,
         { id: int(positionId), limit: int(limit) },
       );
-      return { in_graph: true, paths: paths.records.map(r => r.toObject()) };
+      const list = paths.records.map(r => r.toObject());
+      return { in_graph: true, paths: list, nodes: await nodeFacts(tx, list.flatMap(p => p.position_ids as number[])) };
     });
     const orders = result.paths.length;
     return json({

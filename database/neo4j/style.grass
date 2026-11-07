@@ -1,0 +1,51 @@
+/* Neo4j Browser style for the move graph. In the browser run  :style  then drag this file onto it
+   (or paste it). Boards are white or black by the side to move, transpositions are ringed in blue,
+   nodes are captioned with the move that reached them ("3.Nf3") and edges with the move in SAN. */
+node {
+  diameter: 34px;
+  color: #ffffff;
+  border-color: #2a2e35;
+  border-width: 2px;
+  text-color-internal: #16181d;
+  font-size: 10px;
+  caption: "{name}";
+}
+node.WhiteToMove {
+  color: #ffffff;
+  border-color: #2a2e35;
+  text-color-internal: #16181d;
+  caption: "{name}";
+}
+node.BlackToMove {
+  color: #2a2e35;
+  border-color: #000000;
+  text-color-internal: #ffffff;
+  caption: "{name}";
+}
+node.Transposition {
+  border-color: #2456d3;
+  border-width: 5px;
+  diameter: 44px;
+  caption: "{name}";
+}
+node.Start {
+  color: #2456d3;
+  border-color: #16307a;
+  text-color-internal: #ffffff;
+  diameter: 56px;
+  caption: "Start";
+}
+relationship {
+  color: #8a919c;
+  shaft-width: 2px;
+  font-size: 10px;
+  padding: 3px;
+  text-color-external: #16181d;
+  text-color-internal: #16181d;
+  caption: "{san}";
+}
+relationship.MOVE {
+  color: #8a919c;
+  shaft-width: 2px;
+  caption: "{san}";
+}

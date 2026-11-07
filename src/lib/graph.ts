@@ -3,7 +3,10 @@ import { DEFAULT_POSITION } from "chess.js";
 import { ApiError } from "./http";
 
 // Neo4j holds a derived, rebuildable mirror of MySQL's position/ply tables:
-//   (:Position {position_id, fen, side, is_start})-[:MOVE {san, games, white_wins, black_wins, draws, game_ids}]->(:Position)
+//   (:Position {position_id, fen, side, is_start, ply, line, name, eco, opening})
+//     -[:MOVE {san, games, white_wins, black_wins, draws, game_ids}]->(:Position)
+// Extra labels make the graph readable in Neo4j Browser (see database/neo4j/style.grass):
+//   :Start, :WhiteToMove / :BlackToMove (side to move), :Transposition (entered from 2+ boards).
 // One MOVE edge per (from, to, SAN), aggregated over games, so variable-length path queries
 // enumerate move ORDERS rather than one copy per game. MySQL stays the source of truth.
 
@@ -43,6 +46,8 @@ export const GRAPH_SCHEMA = [
   "CREATE CONSTRAINT position_fen_unique IF NOT EXISTS FOR (p:Position) REQUIRE p.fen IS UNIQUE",
   "CREATE INDEX position_start IF NOT EXISTS FOR (p:Position) ON (p.is_start)",
   "CREATE INDEX move_games IF NOT EXISTS FOR ()-[m:MOVE]-() ON (m.games)",
+  "CREATE INDEX position_ply IF NOT EXISTS FOR (p:Position) ON (p.ply)",
+  "CREATE INDEX position_eco IF NOT EXISTS FOR (p:Position) ON (p.eco)",
 ];
 
 export async function ensureGraphSchema() {
@@ -96,13 +101,31 @@ function chunks<T>(items: T[], size = 1000) {
   return out;
 }
 
-/** Upserts recomputed edges, deletes edges that no longer exist in MySQL and their orphaned nodes, atomically. */
-export async function applyEdges(edges: MoveEdge[], removed: EdgeKey[]) {
+/** Human-readable node facts computed from MySQL (see nodeDetails in graph-sync.ts). */
+export interface NodeDetail { position_id: number; ply: number; line: string; name: string; eco: string | null; opening: string | null }
+
+// Properties + labels. `name` is what Neo4j Browser shows as the node caption (e.g. "3.Nf3").
+// Labels are recomputed from facts every time, so they can never drift from the edges.
+const APPLY_NODES = `
+UNWIND $nodes AS n
+MATCH (p:Position {position_id: n.position_id})
+SET p.ply = n.ply, p.line = n.line, p.name = n.name, p.eco = n.eco, p.opening = n.opening
+WITH p, COUNT { (p)<-[:MOVE]-() } AS indegree
+FOREACH (_ IN CASE WHEN p.side = 'w' THEN [1] ELSE [] END | SET p:WhiteToMove REMOVE p:BlackToMove)
+FOREACH (_ IN CASE WHEN p.side = 'b' THEN [1] ELSE [] END | SET p:BlackToMove REMOVE p:WhiteToMove)
+FOREACH (_ IN CASE WHEN coalesce(p.is_start, false) THEN [1] ELSE [] END | SET p:Start)
+FOREACH (_ IN CASE WHEN indegree >= 2 THEN [1] ELSE [] END | SET p:Transposition)
+FOREACH (_ IN CASE WHEN indegree < 2 THEN [1] ELSE [] END | REMOVE p:Transposition)`;
+
+/** Upserts recomputed edges, deletes edges that no longer exist in MySQL and their orphaned nodes,
+ *  and refreshes node facts/labels, all in ONE Neo4j transaction. */
+export async function applyEdges(edges: MoveEdge[], removed: EdgeKey[], nodes: NodeDetail[] = []) {
   await writeGraph(async tx => {
     for (const batch of chunks(edges)) await tx.run(UPSERT_EDGES, { edges: batch.map(intEdge), start: START_FEN });
     for (const batch of chunks(removed)) await tx.run(REMOVE_EDGES, { keys: batch.map(intKey) });
     const endpoints = [...new Set(removed.flatMap(k => [k.from_position_id, k.to_position_id]))];
     for (const batch of chunks(endpoints)) await tx.run(REMOVE_ORPHANS, { ids: batch.map(int) });
+    for (const batch of chunks(nodes)) await tx.run(APPLY_NODES, { nodes: batch.map(n => ({ ...n, position_id: int(n.position_id), ply: int(n.ply) })) });
   });
 }
 
@@ -130,7 +153,25 @@ export async function clearGraph() {
 /** Ensures the start node exists even before any game is imported. */
 export async function ensureStartNode(positionId: number) {
   await writeGraph(tx => tx.run(
-    "MERGE (s:Position {position_id: $id}) ON CREATE SET s.fen = $fen, s.side = 'w', s.is_start = true",
+    "MERGE (s:Position {position_id: $id}) ON CREATE SET s.fen = $fen, s.side = 'w', s.is_start = true SET s:Start:WhiteToMove, s.ply = 0, s.name = 'Start', s.line = ''",
     { id: int(positionId), fen: START_FEN },
   ));
+}
+
+export interface GraphNode {
+  position_id: number; fen: string; side: "w" | "b"; ply: number | null; name: string | null; line: string | null;
+  eco: string | null; opening: string | null; is_start: boolean; indegree: number; outdegree: number;
+}
+
+/** Facts for the in-site graph view (inside a caller's read transaction). */
+export async function nodeFacts(tx: ManagedTransaction, ids: number[]) {
+  if (!ids.length) return [] as GraphNode[];
+  const result = await tx.run(
+    `UNWIND $ids AS id MATCH (p:Position {position_id: id})
+     RETURN p.position_id AS position_id, p.fen AS fen, p.side AS side, p.ply AS ply, p.name AS name, p.line AS line,
+            p.eco AS eco, p.opening AS opening, coalesce(p.is_start, false) AS is_start,
+            COUNT { (p)<-[:MOVE]-() } AS indegree, COUNT { (p)-[:MOVE]->() } AS outdegree`,
+    { ids: [...new Set(ids)].map(int) },
+  );
+  return result.records.map(r => r.toObject() as GraphNode);
 }

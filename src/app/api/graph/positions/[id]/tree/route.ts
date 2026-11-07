@@ -3,16 +3,16 @@ import { z } from "zod";
 import { getPool } from "@/lib/db";
 import { authorize } from "@/lib/auth";
 import { errorResponse, found, id, json, type IdContext } from "@/lib/http";
-import { int, readGraph } from "@/lib/graph";
+import { int, nodeFacts, readGraph } from "@/lib/graph";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const querySchema = z.object({
-  depth: z.coerce.number().int().min(1).max(4).default(2),
+  depth: z.coerce.number().int().min(1).max(6).default(2),
   min_games: z.coerce.number().int().min(1).max(100000).default(1),
 });
-const MAX_EDGES = 400;
+const MAX_EDGES = 300;
 
 // Opening tree: every continuation reachable within N plies (variable-length traversal),
 // optionally pruned to moves played in at least `min_games` games.
@@ -27,7 +27,7 @@ export async function GET(request: Request, context: IdContext) {
     const [rows] = await connection.execute<RowDataPacket[]>("SELECT position_id, fen FROM `position` WHERE position_id = ?", [positionId]);
     const root = found(rows);
     await connection.commit();
-    const edges = await readGraph(async tx => {
+    const { edges, nodes } = await readGraph(async tx => {
       // Variable-length bounds cannot be parameters in Cypher; `depth` is a zod-validated integer 1–4.
       const result = await tx.run(
         `MATCH (root:Position {position_id: $id})
@@ -41,14 +41,16 @@ export async function GET(request: Request, context: IdContext) {
                 r.white_wins AS white_wins, r.black_wins AS black_wins, r.draws AS draws`,
         { id: int(positionId), min_games: int(min_games), max: int(MAX_EDGES + 1) },
       );
-      return result.records.map(r => r.toObject());
+      const edges = result.records.map(r => r.toObject());
+      const nodes = await nodeFacts(tx, [positionId, ...edges.slice(0, MAX_EDGES).flatMap(e => [e.from_position_id, e.to_position_id])]);
+      return { edges, nodes };
     });
     const truncated = edges.length > MAX_EDGES;
     const kept = edges.slice(0, MAX_EDGES);
     const branching = new Map<number, number>();
     for (const e of kept) branching.set(e.from_position_id, (branching.get(e.from_position_id) ?? 0) + 1);
     return json({
-      root, depth, min_games, truncated, edges: kept,
+      root, depth, min_games, truncated, edges: kept, nodes,
       branch_points: [...branching.values()].filter(n => n >= 2).length,
       max_branching: Math.max(0, ...branching.values()),
     });
