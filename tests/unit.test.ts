@@ -193,3 +193,37 @@ test("graph migration keeps the outbox transactional and the edge view shared", 
   assert.match(sync, /FOR UPDATE SKIP LOCKED/);
   assert.match(sync, /FROM v_move_edge/);
 });
+
+test("Lichess helpers: broadcast links, multi-game PGN with comments, classical-only filter", async () => {
+  const { broadcastId, splitPgn, isClassical, pgnDate } = await import("../src/lib/lichess");
+  assert.equal(broadcastId("3COxSfdj"), "3COxSfdj");
+  assert.equal(broadcastId("https://lichess.org/broadcast/tata-steel-chess-2026-masters/3COxSfdj"), "3COxSfdj");
+  assert.deepEqual(broadcastId("https://lichess.org/broadcast/tata-steel-chess-2026-masters/round-1/FRGTkE8Z/LJZcVbL4"), { round: "FRGTkE8Z" });
+  assert.throws(() => broadcastId("https://example.com/not-lichess"), ApiError);
+  const games = splitPgn(`[Event "A"]\n[White "X"]\n\n1. e4 { [%eval 0.2] [%clk 1:59:00] } 1... e5 { Good. } { [%clk 1:58:00] } 1-0\n\n[Event "B"]\n[Round "1.2"]\n\n1. d4 $1 d5 *`);
+  assert.equal(games.length, 2);
+  assert.equal(games[0].headers.White, "X");
+  assert.doesNotMatch(games[0].pgn, /\{|%clk/);
+  assert.equal(parseGame(games[0].pgn).moves.length, 2, "Comment-free PGN passes the strict parser");
+  assert.equal(parseGame(games[1].pgn).moves.length, 2, "NAGs ($1) are dropped too");
+  assert.equal(isClassical({ BroadcastURL: "https://lichess.org/broadcast/norway-chess-2026-open/round-1-armageddon/EvhLnLzc" }), false);
+  assert.equal(isClassical({ BroadcastURL: "https://lichess.org/broadcast/norway-chess-2026-open/round-1/abcdefgh" }), true);
+  assert.equal(pgnDate("2026.10.02"), "2026-10-02");
+  assert.equal(pgnDate("2026.??.??"), null);
+});
+
+test("numbered pagination shows first, last and the neighbourhood of the current page", async () => {
+  const { pageWindow } = await import("../src/components/ui");
+  assert.deepEqual(pageWindow(1, 5), [1, 2, 3, 4, 5]);
+  assert.deepEqual(pageWindow(1, 25), [1, 2, "…", 24, 25]);
+  assert.deepEqual(pageWindow(12, 25), [1, 2, "…", 11, 12, 13, "…", 24, 25]);
+  assert.deepEqual(pageWindow(25, 25), [1, 2, "…", 24, 25]);
+});
+
+test("migration 003 keeps triggers auditing the new engine columns and adds the per-player game view", async () => {
+  const sql = await readFile(new URL("../database/migrations/003_lichess_metadata.sql", import.meta.url), "utf8");
+  assert.match(sql, /DROP TRIGGER trg_evaluation_insert/);
+  assert.match(sql, /'best_move', NEW\.best_move_san/);
+  assert.match(sql, /CREATE VIEW v_player_game AS[\s\S]+UNION ALL/);
+  assert.doesNotMatch(sql, /DROP TABLE|TRUNCATE/i, "Migrations never destroy data");
+});

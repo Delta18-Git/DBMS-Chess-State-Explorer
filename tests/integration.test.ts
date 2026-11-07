@@ -236,6 +236,68 @@ test("real MySQL and Next.js HTTP integration", { timeout: 120000 }, async t => 
       assert.equal((await api(`/positions/${target}`)).status, 200, "Deleting one game must not delete shared positions");
       assert.equal((await api(`/games/${gameB.game_id}`)).data.plies.length, 6);
     });
+    await t.test("multi-game PGN import, list totals, repertoire ownership and deviations, accounts", async () => {
+      const header = (white: string, black: string, n: string, result: string) =>
+        `[Event "${prefix} Club Open"]\n[Round "1.${n}"]\n[White "${prefix} ${white}"]\n[Black "${prefix} ${black}"]\n[Result "${result}"]\n` +
+        `[WhiteElo "2100"]\n[BlackElo "2050"]\n[ECO "C20"]\n[Opening "${prefix} Test Opening"]\n[GameURL "https://lichess.org/broadcast/t/r/${prefix}${n}"]`;
+      const pgn = [
+        `${header("Alpha", "Beta", "1", "1-0")}\n\n1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 1-0`,
+        `${header("Alpha", "Gamma", "2", "1/2-1/2")}\n\n1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 1/2-1/2`,
+        `${header("Alpha", "Beta", "3", "0-1")}\n\n1. e4 e5 2. Nf3 Nf6 0-1`,
+      ].join("\n\n");
+      assert.equal((await api("/import/pgn", "POST", { pgn }, analyst)).status, 403, "Imports are admin-only");
+      const imported = await api("/import/pgn", "POST", { pgn });
+      assert.equal(imported.status, 201, JSON.stringify(imported));
+      assert.equal(imported.data.imported, 3);
+      tracked.game_id.push(...imported.data.game_ids);
+      tracked.tournament_id.push(imported.data.tournament_id);
+      const again = await api("/import/pgn", "POST", { pgn });
+      assert.equal(again.data.duplicates, 3, "game.source_url is UNIQUE: re-imports are skipped");
+      const first = (await api(`/games/${imported.data.game_ids[0]}`)).data;
+      for (const id of [first.white_player_id, first.black_player_id]) tracked.player_id.push(id);
+      tracked.opening_id.push(first.opening_id);
+      const third = (await api(`/games/${imported.data.game_ids[2]}`)).data;
+      assert.equal(third.white_player_id, first.white_player_id, "Players are matched by name across games");
+      assert.equal(third.black_player_id, first.black_player_id);
+      const gamma = (await api(`/games/${imported.data.game_ids[1]}`)).data.black_player_id;
+      tracked.player_id.push(gamma);
+      for (const g of imported.data.game_ids) for (const p of (await api(`/games/${g}`)).data.plies) { positionIds.add(p.from_position_id); positionIds.add(p.to_position_id); }
+      assert.equal(first.round, "1.1");
+      assert.equal(first.white_elo, 2100);
+
+      // Lists carry their full match count (COUNT(*) OVER ()) for numbered pagination.
+      const page = await api(`/games?tournament_id=${imported.data.tournament_id}&limit=2`);
+      assert.equal(page.data.length, 2);
+      assert.equal(Number(page.data[0].total_rows), 3);
+      assert.equal((await api(`/games?tournament_id=${imported.data.tournament_id}&result=0-1`)).data.length, 1);
+      const standings = (await api(`/tournaments/${imported.data.tournament_id}`)).data.standings;
+      const alpha = standings.find((s: any) => s.player_id === first.white_player_id);
+      assert.equal(Number(alpha.points), 1.5);
+      assert.equal(Number(alpha.place), 1);
+
+      // Repertoires: built from the player's own games with INSERT … SELECT, then compared to them.
+      const rep = await create("/repertoires", { player_id: first.white_player_id, name: `${prefix} Alpha White`, color: "w" }, "repertoire_id");
+      const built = await api(`/repertoires/${rep.repertoire_id}/build`, "POST", { moves: 3, min_games: 1 });
+      assert.equal(built.status, 201);
+      const detail = (await api(`/repertoires/${rep.repertoire_id}`)).data;
+      const afterNc6 = detail.lines.find((l: any) => l.move_san === "Bb5" || l.move_san === "Bc4");
+      assert.ok(afterNc6, JSON.stringify(detail.lines));
+      assert.equal(detail.deviations.length, 1, "One of the two games after 2…Nc6 left the prepared move");
+      assert.equal((await api(`/repertoires/${rep.repertoire_id}`, "PATCH", { name: "Hijack" }, analyst)).status, 403, "Analysts cannot edit others' repertoires");
+      const mine = await api("/repertoires", "POST", { player_id: first.white_player_id, name: `${prefix} analyst's`, color: "b" }, analyst);
+      assert.equal(mine.status, 201, "Analysts may create their own repertoires");
+      tracked.repertoire_id.push(mine.data.repertoire_id);
+      assert.equal((await api(`/repertoires/${mine.data.repertoire_id}`, "PATCH", { name: `${prefix} renamed` }, analyst)).status, 200);
+
+      // Accounts are managed by admins only; the last admin and one's own account are protected.
+      assert.equal((await api("/users", "GET", undefined, analyst)).status, 403);
+      const user = await api("/users", "POST", { email: `${prefix}-new@example.com`, display_name: "New Analyst", role: "analyst", password: "a-long-enough-password" });
+      assert.equal(user.status, 201);
+      tracked.user_id.push(user.data.user_id);
+      assert.equal((await api("/users", "POST", { email: `${prefix}-short@example.com`, display_name: "X", role: "analyst", password: "short" })).status, 400);
+      assert.equal((await api(`/users/${tracked.user_id[0]}`, "DELETE")).status, 409, "Admins cannot delete themselves");
+      assert.equal((await api(`/users/${user.data.user_id}`, "DELETE")).status, 200);
+    });
     await t.test("database-level checks and safe CREATE/ALTER/DROP demonstration", async () => {
       await assert.rejects(sql.execute("INSERT INTO player (name, rating) VALUES ('Invalid', 4000)"), { code: "ER_CHECK_CONSTRAINT_VIOLATED" });
       await assert.rejects(sql.execute("INSERT INTO evaluation (position_id, cp, depth) VALUES (?, 0, 0)", [detailA.plies[0].from_position_id]), { code: "ER_CHECK_CONSTRAINT_VIOLATED" });
