@@ -1,163 +1,171 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { apiFind, apiGet, currentUser } from "@/lib/web/api";
-import { Board } from "@/components/Board";
-import { MoveTree } from "@/components/MoveTree";
+import { apiFind, apiGet, currentUser, qs } from "@/lib/web/api";
 import { ActionForm, Field } from "@/components/ActionForm";
-import { addEvaluation, deleteEvaluation, updatePositionComment } from "@/app/actions";
-import { Db, Empty, PageHead, ResultBar, ResultLegend, n, pawns } from "@/components/ui";
+import { ExplorerBoard } from "@/components/ExplorerBoard";
+import { Modal } from "@/components/Modal";
+import { MoveGraph } from "@/components/MoveGraph";
+import { RowLink } from "@/components/RowLink";
+import { Tabs } from "@/components/Tabs";
+import { addEvaluation, analyse, deleteEvaluation, updatePositionComment } from "@/app/actions";
+import { AdminBar, Eco, EvalChip, Empty, PageHead, Result, ResultBar, ResultLegend, TitleChip, pawns, roundLabel } from "@/components/ui";
 
-function MoveOrder({ moves }: { moves: string[] }) {
-  return (
-    <span className="san-list">
-      {moves.map((m, i) => <span key={i} className="san">{i % 2 === 0 ? `${i / 2 + 1}.` : ""}{m}</span>)}
-    </span>
-  );
-}
+export const metadata = { title: "Explorer · Chess State Explorer" };
 
-export default async function PositionPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ depth?: string; min_games?: string }> }) {
+/** "1.d4 Nf6 2.c4" → ["d4", "Nf6", "c4"] */
+const sans = (line?: string | null) => (line ?? "").split(/\s+/).map(t => t.replace(/^\d+\.(\.\.)?/, "")).filter(Boolean);
+const numbered = (moves: string[], diff?: Set<number>) => moves.map((m, i) => (
+  <span key={i}>{i % 2 === 0 ? `${i / 2 + 1}.` : ""}{diff?.has(i) ? <span className="diff">{m}</span> : m} </span>
+));
+
+export default async function PositionPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<Record<string, string | undefined>> }) {
   const { id } = await params;
   const sp = await searchParams;
   if (!/^\d+$/.test(id)) notFound();
   const position = await apiFind(`/positions/${id}`);
   if (!position) notFound();
-  const depth = Math.min(4, Math.max(1, Number(sp.depth) || 2));
-  const minGames = Math.max(1, Number(sp.min_games) || 1);
+  const depth = Math.min(5, Math.max(1, Number(sp.depth) || 3));
   const [user, explorer, evals, paths, tree] = await Promise.all([
     currentUser(),
-    apiGet(`/analytics/positions/${id}?limit=50`),
+    apiGet(`/analytics/positions/${id}?limit=40`),
     apiGet(`/evaluations?position_id=${id}&limit=10`),
-    apiGet(`/graph/positions/${id}/paths?limit=30`).catch(() => null),
-    apiGet(`/graph/positions/${id}/tree?depth=${depth}&min_games=${minGames}`).catch(() => null),
+    apiGet(`/graph/positions/${id}/paths?limit=12`).catch(() => null),
+    apiGet(`/graph/positions/${id}/tree?depth=${depth}&min_games=${Math.max(1, Number(sp.min_games) || 1)}`).catch(() => null),
   ]);
   const admin = user.role === "admin";
-  const sideToMove = position.fen.split(" ")[1] === "w" ? "White" : "Black";
+  const node = paths?.nodes?.find((n: any) => Number(n.position_id) === Number(id));
+  const line = sp.line ? sp.line.split(" ").filter(Boolean) : sans(node?.line);
+  const isStart = Boolean(node?.is_start) || position.comment === "Standard starting position";
+  const name = explorer.opening?.name ?? node?.opening ?? (isStart ? "Starting position" : null);
+  const toMove = position.fen.split(" ")[1] === "w" ? "White" : "Black";
+  const moves = explorer.next_moves;
+  const total = moves.reduce((s: number, m: any) => s + Number(m.games), 0);
+  const orders = paths?.paths?.filter((p: any) => p.depth > 0) ?? [];
+  // Highlight where each move order differs from the first one.
+  const base: string[] = orders[0]?.moves ?? [];
+  const pathEdges = (paths?.paths ?? []).flatMap((p: any) => p.moves.map((san: string, i: number) => ({
+    from_position_id: p.position_ids[i], to_position_id: p.position_ids[i + 1], san, games: p.edge_games[i],
+  })));
+  const uniqueEdges = [...new Map(pathEdges.map((e: any) => [`${e.from_position_id}-${e.to_position_id}-${e.san}`, e])).values()];
+  const lineQs = (san: string) => qs({ line: [...line, san].join(" ") });
+
+  const nextMoves = moves.length ? (
+    <>
+      <div className="card-body small muted" style={{ paddingBottom: 0 }}>
+        {total} game{total === 1 ? "" : "s"} continued from here{position.cp !== null || position.mate !== null ? <> · Stockfish: <b className="ink-2">{pawns(position.cp, position.mate)}</b>, best <b className="ink-2 mono">{position.best_move_san ?? "—"}</b></> : null}
+      </div>
+      <div className="table-wrap"><table className="t">
+        <thead><tr><th>Move</th><th className="num">Games</th><th className="center">White / draw / Black</th><th className="num" title="Stockfish evaluation after the move">Eval</th><th className="num hide-sm" title="Average rating of the players who chose it">Rating</th></tr></thead>
+        <tbody>{moves.map((m: any) => (
+          <RowLink key={`${m.move_san}-${m.to_position_id}`} href={`/positions/${m.to_position_id}${lineQs(m.move_san)}`}>
+            <td><Link href={`/positions/${m.to_position_id}${lineQs(m.move_san)}`} className="san">{m.move_san}</Link>{m.move_san === position.best_move_san && <span className="chip chip-good" style={{ marginLeft: 6 }} title="Stockfish's choice">best</span>}{m.opening_name && <div className="tiny muted" style={{ maxWidth: 220 }}>{m.opening_name}</div>}</td>
+            <td className="num nowrap">{m.games} <span className="muted small">· {Math.round((100 * Number(m.games)) / (total || 1))}%</span></td>
+            <td style={{ width: 150 }}><ResultBar w={m.white_wins} d={m.draws} b={m.black_wins} /></td>
+            <td className="num"><EvalChip cp={m.cp} mate={m.mate} /></td>
+            <td className="num hide-sm">{m.avg_elo ?? "—"}</td>
+          </RowLink>
+        ))}</tbody>
+      </table></div>
+      <div className="card-foot"><ResultLegend /></div>
+    </>
+  ) : <Empty>No stored game continued from this position.</Empty>;
+
+  const comesNext = (
+    <>
+      <div className="filters">
+        <span className="small muted" style={{ alignSelf: "center" }}>Every continuation in the stored games</span>
+        <div className="seg" style={{ marginLeft: "auto" }}>{[2, 3, 4, 5].map(d => <Link key={d} scroll={false} href={`/positions/${id}${qs({ line: sp.line, depth: d, tab: "graph" })}`} aria-current={depth === d ? "true" : undefined}>{d} plies</Link>)}</div>
+      </div>
+      {!tree ? <Empty>Graph database offline.</Empty> : tree.edges.length ? <MoveGraph nodes={tree.nodes} edges={tree.edges} rootId={Number(id)} height={520} /> : <Empty>No continuations.</Empty>}
+    </>
+  );
+
+  const gotHere = !paths ? <Empty>Graph database offline.</Empty> : !paths.in_graph ? <Empty>This board is not part of any stored game.</Empty> : (
+    <>
+      <div className="card-body small muted" style={{ paddingBottom: 0 }}>{orders.length > 1 ? `Shortest move orders from the starting position. They meet in this board: a transposition (${paths.move_orders} orders).` : "Shortest move order from the starting position."}</div>
+      <table className="t compact"><tbody>{orders.slice(0, 6).map((p: any, i: number) => (
+        <tr key={i}>
+          <td className="line">{numbered(p.moves, i ? new Set(p.moves.map((m: string, j: number) => (m !== base[j] ? j : -1)).filter((j: number) => j >= 0)) : undefined)}</td>
+          <td className="small nowrap" style={{ textAlign: "right" }}>{p.played_by.length ? <>{p.played_by.length} game{p.played_by.length === 1 ? "" : "s"}{" "}{p.played_by.slice(0, 3).map((g: number) => <Link key={g} href={`/games/${g}`} style={{ marginLeft: 4 }}>#{g}</Link>)}</> : <span className="muted" title="Stitched from moves of different games">never as a whole</span>}</td>
+        </tr>
+      ))}</tbody></table>
+      {orders.length > 1 && <MoveGraph nodes={paths.nodes} edges={uniqueEdges as any} targetId={Number(id)} height={380} />}
+    </>
+  );
+
+  const gamesHere = explorer.games.length ? <div className="table-wrap"><table className="t">
+    <thead><tr><th>White</th><th className="center">Result</th><th>Black</th><th className="hide-sm">Event</th></tr></thead>
+    <tbody>{explorer.games.map((g: any) => (
+      <RowLink key={g.game_id} href={`/games/${g.game_id}?ply=${g.ply_no}`}>
+        <td><TitleChip title={g.white_title} /> {g.white_name} <span className="muted small">{g.white_elo}</span></td>
+        <td className="center"><Result result={g.result} /></td>
+        <td><TitleChip title={g.black_title} /> {g.black_name} <span className="muted small">{g.black_elo}</span></td>
+        <td className="small muted hide-sm"><div>{g.tournament_name}</div><div className="tiny">{roundLabel(g.round)}</div></td>
+      </RowLink>
+    ))}</tbody></table></div> : <Empty>No game reached this board (it may only appear in the opening catalogue).</Empty>;
+
+  const evaluations = (
+    <>
+      {evals.length ? <table className="t">
+        <thead><tr><th>Score</th><th>Best move</th><th className="num">Depth</th>{admin && <th />}</tr></thead>
+        <tbody>{evals.map((e: any) => (
+          <tr key={e.evaluation_id}>
+            <td><EvalChip cp={e.cp} mate={e.mate} />{e.evaluation_id === position.evaluation_id && <span className="chip" style={{ marginLeft: 6 }}>used</span>}</td>
+            <td className="san">{e.best_move_san ?? "—"}</td>
+            <td className="num">{e.depth}</td>
+            {admin && <td className="num"><ActionForm inline action={deleteEvaluation.bind(null, e.evaluation_id, position.position_id)} submit="Delete" variant="ghost" small confirm="Delete this evaluation? The audit trigger keeps a snapshot." /></td>}
+          </tr>
+        ))}</tbody>
+      </table> : <Empty>No evaluation stored.</Empty>}
+      <div className="card-foot tiny muted">The deepest evaluation is used everywhere (view <code>v_latest_evaluation</code>).{position.comment && !isStart ? <> Comment: {position.comment}</> : null}</div>
+      <div className="card-foot tiny muted mono" style={{ wordBreak: "break-all" }}>{position.fen}</div>
+    </>
+  );
 
   return (
     <>
-      <PageHead title={`Position #${position.position_id}`} sub={<>{sideToMove} to move · seen in <b>{explorer.usage.games}</b> game(s), {explorer.usage.occurrences} time(s)</>}>
-        <Link href="/positions" className="btn btn-ghost">Find a position</Link>
+      <PageHead crumbs={[["Explorer", "/positions"], ...(name && !isStart ? [[name.split(":")[0], null] as [string, null]] : [])]}
+        title={<span className="row" style={{ gap: 10 }}>{explorer.opening && <Eco eco={explorer.opening.eco} />}{name ?? "Position"}</span>}
+        lead={<>{toMove} to move · reached in <b>{explorer.usage.games}</b> game{Number(explorer.usage.games) === 1 ? "" : "s"}{orders.length > 1 && <> · <b>{paths.move_orders}</b> different move orders lead here</>}</>}>
+        <form className="lookup" action="/positions" style={{ minWidth: 280 }}>
+          <input name="moves" placeholder="Jump to moves, e.g. 1.e4 c5 2.Nf3" aria-label="Moves" />
+          <button className="btn btn-ghost">Go</button>
+        </form>
       </PageHead>
 
-      <div className="grid" style={{ gridTemplateColumns: "minmax(260px, 400px) 1fr" }}>
-        <div className="stack">
-          <Board fen={position.fen} />
-          <div className="card small stack" style={{ gap: 6 }}>
-            <div><span className="muted">Canonical FEN</span><br /><code style={{ wordBreak: "break-all" }}>{position.fen}</code></div>
-            <div><span className="muted">Best stored evaluation</span><br /><b>{position.evaluation_id ? pawns(position.cp) : "none"}</b>{position.depth ? <span className="muted"> (depth {position.depth})</span> : null}</div>
-            {position.comment && <div><span className="muted">Comment</span><br />{position.comment}</div>}
-          </div>
-        </div>
-
-        <div className="stack">
-          <section className="card">
-            <h2>Move orders that reach this board <Db kind="Neo4j" /></h2>
-            {!paths ? <Empty>Graph database offline.</Empty>
-              : !paths.in_graph ? <Empty>This board is not part of any stored game&apos;s moves.</Empty>
-              : (
-                <>
-                  <p className="muted small" style={{ marginTop: -6 }}>
-                    <code>allShortestPaths</code> from the initial board over aggregated <code>MOVE</code> edges.
-                    {paths.is_transposition
-                      ? <> <b>{paths.move_orders}</b> distinct move orders: this board is a <b>transposition</b>.{paths.unplayed_orders > 0 && <> {paths.unplayed_orders} of them stitch together moves from different games and were never played as a whole.</>}</>
-                      : " Only one move order reaches this board."}
-                  </p>
-                  <div className="table-wrap"><table className="data">
-                    <thead><tr><th>Move order</th><th>Played in full by</th></tr></thead>
-                    <tbody>{paths.paths.map((p: any, i: number) => (
-                      <tr key={i}>
-                        <td>{p.depth === 0 ? <span className="muted">initial position</span> : <MoveOrder moves={p.moves} />}</td>
-                        <td className="small">{p.depth === 0 ? "—" : p.played_by.length
-                          ? p.played_by.slice(0, 5).map((g: number, j: number) => <span key={g}>{j ? ", " : ""}<Link href={`/games/${g}`}>#{g}</Link></span>)
-                          : <span className="badge">combined from other games</span>}
-                          {p.played_by.length > 5 && <span className="muted"> +{p.played_by.length - 5}</span>}
-                        </td>
-                      </tr>
-                    ))}</tbody>
-                  </table></div>
-                </>
-              )}
-          </section>
-
-          <section className="card">
-            <h2>Next moves <Db kind="MySQL" /></h2>
-            {explorer.next_moves.length ? (
-              <>
-                <div className="table-wrap"><table className="data">
-                  <thead><tr><th>Move</th><th className="num">Games</th><th>Results</th><th className="num">Occurrences</th></tr></thead>
-                  <tbody>{explorer.next_moves.map((m: any) => (
-                    <tr key={`${m.move_san}-${m.to_position_id}`}>
-                      <td><Link href={`/positions/${m.to_position_id}`} className="san">{m.move_san}</Link></td>
-                      <td className="num">{m.games}</td>
-                      <td><ResultBar w={n(m.white_wins)!} d={n(m.draws)!} b={n(m.black_wins)!} /></td>
-                      <td className="num">{m.occurrences}</td>
-                    </tr>
-                  ))}</tbody>
-                </table></div>
-                <ResultLegend />
-              </>
-            ) : <Empty>No stored game continues from here.</Empty>}
-          </section>
-        </div>
-      </div>
-
-      <section className="card" style={{ marginTop: 16 }}>
-        <div className="page-head" style={{ marginBottom: 8 }}>
-          <h2 style={{ margin: 0 }}>Opening tree <Db kind="Neo4j" /></h2>
-          <form className="row" method="get">
-            <label className="field"><span className="field-label">Depth (plies)</span>
-              <select name="depth" defaultValue={depth}>{[1, 2, 3, 4].map(d => <option key={d}>{d}</option>)}</select>
-            </label>
-            <label className="field"><span className="field-label">Min games per move</span>
-              <input name="min_games" type="number" min={1} defaultValue={minGames} style={{ width: 90 }} />
-            </label>
-            <button className="btn btn-ghost" style={{ alignSelf: "flex-end" }}>Update</button>
-          </form>
-        </div>
-        {!tree ? <Empty>Graph database offline.</Empty> : tree.edges.length ? (
-          <>
-            <p className="muted small" style={{ marginTop: 0 }}>
-              Variable-length traversal <code>(root)-[:MOVE*1..{depth}]-&gt;()</code>: {tree.edges.length} edges, {tree.branch_points} branching positions, widest branch {tree.max_branching} moves{tree.truncated ? " (truncated)" : ""}.
-            </p>
-            <MoveTree rootId={position.position_id} edges={tree.edges} depth={depth} />
-          </>
-        ) : <Empty>No continuations{minGames > 1 ? ` played in ${minGames}+ games` : ""}.</Empty>}
-      </section>
-
-      <div className="grid grid-2" style={{ marginTop: 16 }}>
-        <section className="card">
-          <h2>Evaluation history <Db kind="MySQL" /></h2>
-          {evals.length ? (
-            <table className="data">
-              <thead><tr><th>#</th><th className="num">Score</th><th className="num">Depth</th>{admin && <th />}</tr></thead>
-              <tbody>{evals.map((e: any) => (
-                <tr key={e.evaluation_id}>
-                  <td>{e.evaluation_id}{e.evaluation_id === position.evaluation_id && <span className="badge" style={{ marginLeft: 6 }}>best</span>}</td>
-                  <td className="num">{e.cp === null ? "mate / unscored" : pawns(e.cp)}</td>
-                  <td className="num">{e.depth}</td>
-                  {admin && <td><ActionForm inline action={deleteEvaluation.bind(null, e.evaluation_id, position.position_id)} submit="Delete" variant="ghost" confirm="Delete this evaluation? The audit trigger keeps a snapshot." /></td>}
-                </tr>
-              ))}</tbody>
-            </table>
-          ) : <Empty>No evaluations stored for this board.</Empty>}
-          <p className="muted small">The best evaluation is chosen by <code>v_latest_evaluation</code> (<code>ROW_NUMBER() OVER (PARTITION BY position_id ORDER BY depth DESC, evaluation_id DESC)</code>).</p>
-        </section>
-        {admin ? (
-          <section className="card stack">
-            <h2>Admin</h2>
+      {admin && (
+        <AdminBar hint="Positions themselves are immutable: the FEN is their identity in both databases">
+          <ActionForm inline action={analyse.bind(null, { position_id: position.position_id })} submit="Store a Stockfish evaluation" icon="cpu" variant="solid" small>
+            <select name="depth" defaultValue="20" aria-label="Depth"><option value="16">Depth 16</option><option value="20">Depth 20</option><option value="24">Depth 24</option></select>
+          </ActionForm>
+          <Modal label="Add evaluation by hand" icon="plus" title="Add an evaluation" className="btn btn-sm">
             <ActionForm action={addEvaluation.bind(null, position.position_id)} submit="Add evaluation" resetOnSuccess>
               <div className="form-row">
-                <Field label="Centipawns (White's view)" hint="Leave empty for a mate / unscored result"><input name="cp" type="number" min={-100000} max={100000} /></Field>
-                <Field label="Depth *"><input name="depth" type="number" min={1} max={255} required defaultValue={20} /></Field>
+                <Field label="Centipawns (White's view)" hint="Empty for a mate / unscored"><input name="cp" type="number" min={-100000} max={100000} /></Field>
+                <Field label="Depth"><input name="depth" type="number" min={1} max={255} required defaultValue={20} /></Field>
               </div>
             </ActionForm>
+          </Modal>
+          <Modal label="Comment" icon="edit" title="Position comment" className="btn btn-sm">
             <ActionForm action={updatePositionComment.bind(null, position.position_id)} submit="Save comment">
-              <Field label="Comment" hint="The FEN itself is immutable: it is the node's identity in both databases."><textarea name="comment" rows={3} maxLength={10000} defaultValue={position.comment ?? ""} /></Field>
+              <Field label="Comment"><textarea name="comment" rows={4} maxLength={10000} defaultValue={position.comment ?? ""} /></Field>
             </ActionForm>
-          </section>
-        ) : (
-          <section className="card"><h2>Read-only access</h2><p className="muted">Analysts can explore every board, path and tree. Adding evaluations or comments requires the admin role; the API rejects those writes with 403.</p></section>
-        )}
+          </Modal>
+        </AdminBar>
+      )}
+
+      <div className="explorer">
+        <ExplorerBoard fen={position.fen} line={line} next={moves.map((m: any) => ({ san: m.move_san, to_position_id: Number(m.to_position_id), games: Number(m.games) }))}
+          stored={{ cp: position.cp === null ? null : Number(position.cp), mate: position.mate === null ? null : Number(position.mate), best: position.best_move_san }} />
+        <section className="card tabs-card">
+          <Tabs initial={sp.tab} tabs={[
+            { id: "moves", label: "Next moves", count: moves.length, content: nextMoves },
+            { id: "graph", label: "What comes next", content: comesNext },
+            ...(isStart ? [] : [{ id: "orders", label: "How games got here", count: orders.length, content: gotHere }]),
+            ...(isStart ? [] : [{ id: "games", label: "Games", count: explorer.games.length, content: gamesHere }]),
+            { id: "evals", label: "Evaluations", count: evals.length, content: evaluations },
+          ]} />
+        </section>
       </div>
     </>
   );

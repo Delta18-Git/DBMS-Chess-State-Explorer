@@ -1,21 +1,20 @@
 import type { ReactNode } from "react";
-import { Archivo, JetBrains_Mono, Source_Sans_3 } from "next/font/google";
+import { IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
 import "./globals.css";
 
-const display = Archivo({ subsets: ["latin"], weight: ["600", "700", "800"], variable: "--font-display" });
-const body = Source_Sans_3({ subsets: ["latin"], weight: ["400", "600", "700"], variable: "--font-body" });
-const mono = JetBrains_Mono({ subsets: ["latin"], weight: ["400", "600"], variable: "--font-mono" });
+const sans = IBM_Plex_Sans({ subsets: ["latin"], weight: ["400", "500", "600", "700"], variable: "--font-sans" });
+const mono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500", "600"], variable: "--font-mono" });
 
 export const metadata = {
   title: "Chess State Explorer",
-  description: "MySQL + Neo4j database for chess opening transpositions and game analytics",
+  description: "Opening transpositions and game analytics over real tournament games (MySQL + Neo4j)",
 };
+export const viewport = { width: "device-width", initialScale: 1, themeColor: "#f4f5f7" };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
-  // Browser extensions (e.g. Video Speed Controller adds class="vsc-initialized") edit <body>
-  // before React hydrates; ignore attribute-only differences on this one element.
+  // Browser extensions edit <body> attributes before React hydrates; ignore that one element.
   return (
-    <html lang="en" className={`${display.variable} ${body.variable} ${mono.variable}`}>
+    <html lang="en" className={`${sans.variable} ${mono.variable}`}>
       <body suppressHydrationWarning>{children}</body>
     </html>
   );
