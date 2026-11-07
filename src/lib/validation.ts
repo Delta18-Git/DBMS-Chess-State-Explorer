@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { date, foreignId } from "./http";
+import { ApiError, date, foreignId } from "./http";
 
 const name = (max: number) => z.string().trim().min(1).max(max);
 export const playerSchema = z.object({
@@ -29,3 +29,10 @@ export const evaluationSchema = z.object({
 export const repertoireSchema = z.object({ player_id: foreignId, name: name(100) }).strict();
 export const lineSchema = z.object({ start_position_id: foreignId, move_san: name(10) }).strict();
 export const loginSchema = z.object({ email: z.email().max(254).transform(v => v.toLowerCase()), password: z.string().min(1).max(256) }).strict();
+
+// User words -> safe BOOLEAN MODE query: strip operators, require every word, allow prefixes.
+export function booleanQuery(q: string) {
+  const words = q.split(/[^\p{L}\p{N}]+/u).filter(w => w.length >= 2).slice(0, 8);
+  if (!words.length) throw new ApiError(400, "q: enter at least one word of two or more letters");
+  return words.map(w => `+${w}*`).join(" ");
+}
