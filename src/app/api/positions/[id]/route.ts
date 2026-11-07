@@ -14,7 +14,7 @@ export async function GET(request: Request, context: IdContext) {
     await connection.query("START TRANSACTION READ ONLY");
     await authorize(connection, request);
     const [rows] = await connection.execute<RowDataPacket[]>(
-      `SELECT p.*, e.evaluation_id, e.cp, e.depth FROM \`position\` p
+      `SELECT p.*, e.evaluation_id, e.cp, e.mate, e.depth, e.best_move_san FROM \`position\` p
        LEFT JOIN v_latest_evaluation e ON e.position_id = p.position_id WHERE p.position_id = ?`, [positionId],
     );
     const position = found(rows);

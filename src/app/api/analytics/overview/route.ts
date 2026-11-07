@@ -32,11 +32,11 @@ export async function GET(request: Request) {
        FROM v_ply_analysis`,
     );
     const [accuracy] = await connection.query<RowDataPacket[]>(
-      `SELECT pl.player_id, pl.name, pl.title, pl.rating,
+      `SELECT pl.player_id, pl.name, pl.title, pl.rating, pl.federation, pl.photo_url,
               COUNT(DISTINCT a.game_id) AS games, COUNT(a.cp_loss) AS evaluated_moves,
               ROUND(AVG(a.cp_loss), 1) AS avg_cp_loss, SUM(a.cp_loss >= 200) AS blunders
        FROM v_ply_analysis a JOIN player pl ON pl.player_id = a.player_id
-       GROUP BY pl.player_id, pl.name, pl.title, pl.rating
+       GROUP BY pl.player_id, pl.name, pl.title, pl.rating, pl.federation, pl.photo_url
        HAVING COUNT(a.cp_loss) >= 20
        ORDER BY avg_cp_loss ASC, evaluated_moves DESC LIMIT 8`,
     );

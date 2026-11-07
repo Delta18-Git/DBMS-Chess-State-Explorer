@@ -2,7 +2,7 @@ import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/prom
 import { getPool } from "@/lib/db";
 import { authorize } from "@/lib/auth";
 import { legalSan } from "@/lib/chess";
-import { body, errorResponse, found, id, json, type IdContext } from "@/lib/http";
+import { ApiError, body, errorResponse, found, id, json, type IdContext } from "@/lib/http";
 import { lineSchema } from "@/lib/validation";
 
 export const runtime = "nodejs";
@@ -13,9 +13,10 @@ export async function POST(request: Request, context: IdContext) {
     const repertoireId = id.parse((await context.params).id);
     const input = lineSchema.parse(await body(request));
     await connection.beginTransaction();
-    await authorize(connection, request, "admin");
-    const [repertoires] = await connection.execute<RowDataPacket[]>("SELECT repertoire_id FROM repertoire WHERE repertoire_id = ? FOR UPDATE", [repertoireId]);
-    found(repertoires);
+    const user = await authorize(connection, request);
+    const [repertoires] = await connection.execute<RowDataPacket[]>("SELECT repertoire_id, owner_user_id FROM repertoire WHERE repertoire_id = ? FOR UPDATE", [repertoireId]);
+    const repertoire = found(repertoires);
+    if (user.role !== "admin" && Number(repertoire.owner_user_id) !== Number(user.user_id)) throw new ApiError(403, "Only the owner or an admin can change this repertoire");
     const [positions] = await connection.execute<RowDataPacket[]>("SELECT fen FROM `position` WHERE position_id = ? FOR SHARE", [input.start_position_id]);
     const position = found(positions);
     const move = legalSan(position.fen, input.move_san);

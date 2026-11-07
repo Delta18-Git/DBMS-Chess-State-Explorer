@@ -25,8 +25,14 @@ export const gamePatchSchema = z.object({
 export const evaluationSchema = z.object({
   position_id: foreignId, cp: z.number().int().min(-100000).max(100000).nullable(),
   depth: z.number().int().min(1).max(255),
+  mate: z.number().int().min(-300).max(300).nullable().default(null),
+  best_move_san: z.string().trim().min(2).max(10).nullable().default(null),
+}).strict().refine(e => e.cp === null || e.mate === null, { message: "Give either cp or mate, not both" });
+export const repertoireSchema = z.object({ player_id: foreignId, name: name(100), color: z.enum(["w", "b"]).default("w") }).strict();
+export const userSchema = z.object({
+  email: z.email().max(254).transform(v => v.toLowerCase()), display_name: name(100),
+  role: z.enum(["admin", "analyst"]), password: z.string().min(12).max(256),
 }).strict();
-export const repertoireSchema = z.object({ player_id: foreignId, name: name(100) }).strict();
 export const lineSchema = z.object({ start_position_id: foreignId, move_san: name(10) }).strict();
 export const loginSchema = z.object({ email: z.email().max(254).transform(v => v.toLowerCase()), password: z.string().min(1).max(256) }).strict();
 

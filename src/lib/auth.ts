@@ -30,12 +30,12 @@ export function bearer(request: Request) {
   if (!match) throw new ApiError(401, "Valid Bearer token required");
   return match[1];
 }
-export interface AuthUser extends RowDataPacket { user_id: number; email: string; role: "admin" | "analyst" }
+export interface AuthUser extends RowDataPacket { user_id: number; email: string; display_name: string | null; role: "admin" | "analyst" }
 
 // Only authentication SQL is shared; all domain SQL and transaction boundaries live in route.ts.
 export async function authorize(connection: PoolConnection, request: Request, role?: "admin") {
   const [users] = await connection.execute<AuthUser[]>(
-    `SELECT u.user_id, u.email, u.role FROM api_session s
+    `SELECT u.user_id, u.email, u.display_name, u.role FROM api_session s
      JOIN app_user u ON u.user_id = s.user_id
      WHERE s.token_hash = ? AND s.expires_at > UTC_TIMESTAMP()`, [tokenHash(bearer(request))],
   );

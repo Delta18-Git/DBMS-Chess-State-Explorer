@@ -33,7 +33,7 @@ export async function POST(request: Request) {
     const e = evaluationSchema.parse(await body(request));
     await connection.beginTransaction();
     await authorize(connection, request, "admin");
-    const [result] = await connection.execute<ResultSetHeader>("INSERT INTO evaluation (position_id, cp, depth) VALUES (?, ?, ?)", [e.position_id, e.cp, e.depth]);
+    const [result] = await connection.execute<ResultSetHeader>("INSERT INTO evaluation (position_id, cp, mate, depth, best_move_san) VALUES (?, ?, ?, ?, ?)", [e.position_id, e.cp, e.mate, e.depth, e.best_move_san]);
     // trg_evaluation_insert records a JSON snapshot atomically with this INSERT.
     await connection.commit();
     return json({ evaluation_id: result.insertId, ...e }, 201);

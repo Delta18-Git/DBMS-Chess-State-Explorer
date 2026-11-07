@@ -12,7 +12,7 @@ export async function GET(request: Request) {
     const { limit, offset } = pagination(request);
     await connection.query("START TRANSACTION READ ONLY");
     await authorize(connection, request);
-    const [rows] = await connection.execute<RowDataPacket[]>("SELECT * FROM evaluation_audit ORDER BY audit_id DESC LIMIT ? OFFSET ?", [String(limit), String(offset)]);
+    const [rows] = await connection.execute<RowDataPacket[]>("SELECT a.*, COUNT(*) OVER () AS total_rows FROM evaluation_audit a ORDER BY a.audit_id DESC LIMIT ? OFFSET ?", [String(limit), String(offset)]);
     await connection.commit();
     return json(rows);
   } catch (error) {

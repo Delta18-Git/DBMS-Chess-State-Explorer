@@ -16,7 +16,7 @@ export class ApiFailure extends Error {
 }
 
 export type Role = "admin" | "analyst";
-export interface SessionUser { user_id: number; email: string; role: Role }
+export interface SessionUser { user_id: number; email: string; display_name: string | null; role: Role }
 
 async function token() {
   return (await cookies()).get(SESSION_COOKIE)?.value;
