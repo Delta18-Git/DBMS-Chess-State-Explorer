@@ -167,7 +167,35 @@ SQL calculates `max(0, (before_cp - after_cp) * (white ? 1 : -1))`. Both endpoin
 
 ### `GET /analytics/positions/:id`
 
-Returns `{ data: { position, usage: { games, occurrences }, next_moves } }`. Counts incoming visits plus an initial-game visit, then groups outgoing moves/destinations and distinct-game outcomes. Repeated visits in one game count multiple occurrences but only one game/outcome per move/destination. `next_moves` supports pagination. This is a SQL one-step opening explorer, **not** the deferred Neo4j transposition-path API.
+Returns `{ data: { position, usage: { games, occurrences }, next_moves } }`. Counts incoming visits plus an initial-game visit, then groups outgoing moves/destinations and distinct-game outcomes. Repeated visits in one game count multiple occurrences but only one game/outcome per move/destination. `next_moves` supports pagination. This is the SQL one-step opening explorer; multi-step move-order queries are the Neo4j endpoints below.
+
+### `GET /analytics/overview`
+
+Dashboard aggregates in one read-only snapshot: `counts` (games, plies, players, openings, tournaments, positions, evaluations, evaluated_positions, repertoires), `results` (games per result), `coverage` (`evaluated_ply_pct`, `avg_cp_loss`, `blunders`), `accuracy` (players with ≥20 evaluated moves, lowest average loss first: JOIN + GROUP BY + HAVING over `v_ply_analysis`) and `popular_positions` (top boards after move 3 by distinct games, ranked with `RANK() OVER`).
+
+## Search
+
+### `GET /search?q=...&type=all|player|opening|tournament&limit=10`
+
+InnoDB `FULLTEXT` search (`MATCH … AGAINST … IN BOOLEAN MODE`) over player names, opening names and tournament name/location, ranked by relevance. The query is rebuilt server-side from letters/digits only: every word of ≥2 characters becomes a required prefix term (`+word*`), so user input can never inject boolean operators. Response: `{ q, query, players?, openings?, tournaments? }`. Opening search also matches an exact ECO code. InnoDB does not index tokens shorter than 3 characters by default.
+
+## Graph (Neo4j)
+
+All graph endpoints authenticate against MySQL sessions exactly like the SQL endpoints. Reads are open to both roles; synchronisation is admin-only. If Neo4j is unreachable they return 503 `Graph database temporarily unavailable` while every MySQL endpoint keeps working.
+
+Graph model: `(:Position {position_id, fen, side, is_start})-[:MOVE {san, games, white_wins, black_wins, draws, game_ids}]->(:Position)`; one aggregated edge per `(from, to, SAN)`. See [DATABASE.md](DATABASE.md#neo4j-graph-mirror).
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET /graph/stats` | `{ mysql: { positions, move_edges, pending_changes, last_synced_at }, graph: { nodes, edges, transpositions, branch_points } }`. `pending_changes` is the replication lag (unprocessed outbox rows). |
+| `GET /graph/transpositions?limit&offset` | Boards with in-degree ≥ 2: `{ position_id, fen, routes, games, incoming: [{ from_position_id, from_fen, san, games }] }`, most routes first. |
+| `GET /graph/positions/:id/paths?limit=50` | Every minimal-length move order from the initial board (`allShortestPaths`). Each path: `depth`, `moves` (SAN), `position_ids`, `edge_games`, `played_by` (games that played the whole order; empty = assembled from different games). Also `in_graph`, `move_orders`, `unplayed_orders`, `is_transposition`. 404 if the position does not exist in MySQL. |
+| `GET /graph/positions/:id/tree?depth=2&min_games=1` | Continuations within `depth` plies (1–4) whose edges were played in ≥ `min_games` games: `edges` (from/to ids, `to_fen`, san, games, results), `branch_points`, `max_branching`, `truncated` (400-edge cap). |
+| `GET /graph/games/:id/novelty` | Walks the game's plies (order from MySQL) over the graph. `novelty` = first ply whose edge no other stored game used: `{ ply_no, san, from_position_id, from_fen, book_plies, alternatives: [{ san, games }], reference_games }`; `null` if every move is shared. `plies` gives per-move popularity. If the game is still in the outbox, returns `synced: false` instead of a guess. |
+| `POST /graph/sync?mode=drain` | **Admin.** Applies up to 200 pending outbox rows: `{ processed, games, edges_upserted, edges_removed }`. Idempotent; call repeatedly until `processed` is 0. |
+| `POST /graph/sync?mode=rebuild` | **Admin.** Wipes and rebuilds the graph from `v_move_edge`, absorbing pending outbox rows: `{ edges, outbox_cleared }`. |
+
+The web UI calls `drain` automatically after importing or deleting a game. If Neo4j is down at that moment the game still commits and the change waits in the outbox.
 
 ## Example import
 
@@ -180,5 +208,11 @@ curl -s http://localhost:3000/api/games \
   -d '{"white_player_id":3,"black_player_id":4,"opening_id":1,"tournament_id":1,"pgn":"1. Nf3 Nf6 2. g3 g6 3. Bg2 Bg7 1-0"}'
 
 curl -s http://localhost:3000/api/analytics/openings \
+  -H "Authorization: Bearer $TOKEN"
+
+curl -s -X POST http://localhost:3000/api/graph/sync \
+  -H "Authorization: Bearer $TOKEN"
+
+curl -s "http://localhost:3000/api/graph/transpositions?limit=5" \
   -H "Authorization: Bearer $TOKEN"
 ```

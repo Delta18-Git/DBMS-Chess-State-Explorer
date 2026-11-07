@@ -2,9 +2,19 @@
 
 ## Problem and objectives
 
-Chess engines evaluate individual boards, but players need cross-game opening results, move-quality trends and common positions reached through different move orders. Store games and reusable board states once, then compute outcomes and centipawn-loss statistics inside the database. Preserve a clean position/move model that a later Neo4j implementor can mirror for path traversal.
+Chess engines evaluate individual boards, but players need cross-game opening results, move-quality trends and common positions reached through different move orders. Store games and reusable board states once, compute outcomes and centipawn-loss statistics inside MySQL, and mirror the position/move structure into Neo4j for move-order path traversal.
 
-MySQL provides relational integrity, atomic multi-table imports and aggregate analytics; Neo4j is justified for variable-length move-order traversal, not as a duplicate CRUD store. This phase deliberately stops at SQL.
+MySQL provides relational integrity, atomic multi-table imports and aggregate analytics; Neo4j is justified for variable-length move-order traversal, not as a duplicate CRUD store.
+
+### Database choice and justification
+
+| Data / question | Store | Why |
+| --- | --- | --- |
+| Players, tournaments, openings, games, plies, evaluations, repertoires, accounts | **MySQL** (source of truth) | Fixed schema with many FKs; imports must be atomic across game + plies + positions; analytics are aggregates (GROUP BY/HAVING, views, window functions, a stored procedure). |
+| "Which move orders reach this board?", "where do lines merge?", "how does play branch from here?", "where did this game leave theory?" | **Neo4j** (derived mirror) | These are variable-length path questions over a graph of ~6k boards. In SQL each needs a recursive CTE that enumerates and de-duplicates paths per query; in Cypher they are one pattern: `allShortestPaths((start)-[:MOVE*]->(target))`, `(root)-[:MOVE*1..4]->()`, `COUNT { (p)<-[:MOVE]-() } >= 2`. |
+| Engine scores | MySQL only | Needed by SQL aggregates; not needed for graph traversal. |
+
+Neo4j holds nothing that cannot be rebuilt from MySQL (`POST /api/graph/sync?mode=rebuild`), so there is one authority for every fact.
 
 ## Submitted data dictionary
 
@@ -37,7 +47,8 @@ All submitted identifiers/FKs are unsigned INT; optional columns are represented
 ## Architecture and ownership
 
 ```text
-future Next.js UI / current HTTP clients
+Next.js UI (Server Components + Server Actions, HttpOnly session cookie)
+   and any other HTTP client
                 |
       src/app/api/**/route.ts
       - validate and authorize
@@ -51,10 +62,12 @@ future Next.js UI / current HTTP clients
       - views / stored procedure
       - triggers / indexes
 
-future Neo4j mirror: positions + played moves (not yet connected)
+      MySQL graph_outbox  --(relay: /api/graph/sync)-->  Neo4j 5 / 2026.x
+      (trigger-written)                                    (:Position)-[:MOVE]->(:Position)
+                                                           read by /api/graph/* routes
 ```
 
-Only authentication lookup SQL is shared in `src/lib/auth.ts`. Chess helpers never issue SQL. No domain service, generic CRUD generator, or transaction wrapper conceals query execution from the route handler.
+Only authentication lookup SQL is shared in `src/lib/auth.ts`. Chess helpers never issue SQL. No domain service, generic CRUD generator, or transaction wrapper conceals query execution from the route handler. The one shared piece of database logic is the outbox relay (`src/lib/graph-sync.ts`), which is infrastructure used by both the sync route and the CLI; it never begins or commits a transaction itself: the caller owns the MySQL transaction boundary. Graph read queries are written inline in each `/api/graph/**/route.ts`, like SQL.
 
 ## Demonstration matrix
 
@@ -74,8 +87,77 @@ Only authentication lookup SQL is shared in `src/lib/auth.ts`. Chess helpers nev
 | Stored procedure | `sp_player_summary`, called by player analytics route |
 | Triggers | Score insert/delete → atomic JSON audit row |
 | Indexes | FEN uniqueness, game/ply uniqueness, player/date, evaluation position/depth/ID, FK indexes |
+| Full-text search | `FULLTEXT` indexes added by `ALTER TABLE` (migration 002); `GET /api/search` uses `MATCH … AGAINST … IN BOOLEAN MODE` |
+| Triggers (graph) | `trg_game_graph_insert` / `trg_game_graph_delete` write `graph_outbox` inside the game's transaction |
+| Locking reads | Outbox relay claims rows with `FOR UPDATE SKIP LOCKED` |
+| Window function | `RANK() OVER` for most-visited boards in `/api/analytics/overview` |
+| NoSQL graph | Neo4j constraints/indexes, variable-length traversal, `allShortestPaths`, `COUNT {}` subqueries (see below) |
 
-The project demonstrates **five advanced categories** before counting Neo4j: transactions, views, stored procedure, triggers, indexing.
+The project demonstrates **seven advanced categories**: transactions, views, stored procedure, triggers, indexing, full-text search and NoSQL graph traversal.
+
+## Neo4j graph mirror
+
+### Data model
+
+```text
+(:Position {position_id: INT, fen: STRING, side: 'w'|'b', is_start: BOOLEAN})
+   -[:MOVE {san, games, white_wins, black_wins, draws, game_ids: [INT]}]->
+(:Position)
+```
+
+- **Nodes** are MySQL `position` rows that appear in at least one played move, plus the initial board. `position_id` is the MySQL primary key; `fen` is the same canonical FEN (clocks dropped), so both stores agree on board identity.
+- **Edges** are **aggregated** played moves: one `MOVE` per `(from_position_id, to_position_id, SAN)`, carrying the number of distinct games, their results and the list of game IDs. Aggregation keeps path enumeration about *move orders* rather than one parallel edge per game; `game_ids` keeps provenance so "which games played this whole order?" is a list intersection.
+- Repertoire lines are recommendations, not played moves, and are **not** in the graph. Evaluations stay in MySQL.
+- The graph is a directed graph, not strictly a DAG: repetitions create cycles. All traversals are bounded.
+
+### Constraints and indexes (`src/lib/graph.ts`, created idempotently by `npm run graph:sync` and every rebuild)
+
+| Statement | Purpose |
+| --- | --- |
+| `CREATE CONSTRAINT position_id_unique … REQUIRE p.position_id IS UNIQUE` | One node per MySQL row; backing index for every `{position_id: …}` lookup and `MERGE`. |
+| `CREATE CONSTRAINT position_fen_unique … REQUIRE p.fen IS UNIQUE` | Same identity rule as MySQL's `uq_position_fen`. |
+| `CREATE INDEX position_start … ON (p.is_start)` | Fast anchor for path queries from the initial board. |
+| `CREATE INDEX move_games … FOR ()-[m:MOVE]-() ON (m.games)` | Relationship-property index for popularity filters (`min_games`). |
+
+### Synchronisation: transactional outbox (migration `001_graph_outbox.sql`)
+
+MySQL and Neo4j cannot share one transaction, so a "dual write" from the import handler could commit in one store and fail in the other. Instead:
+
+1. `trg_game_graph_insert` / `trg_game_graph_delete` insert a `graph_outbox(game_id, action)` row **inside the same MySQL transaction** as the game insert/delete. A rolled-back import leaves no outbox row; a committed one always does.
+2. The relay (`POST /api/graph/sync`, `npm run graph:sync`) begins a MySQL transaction and claims up to 200 pending rows with `SELECT … FOR UPDATE SKIP LOCKED` (concurrent relays never claim the same rows).
+3. Affected edges = the game's current plies in MySQL ∪ graph edges whose `game_ids` contain the game. Each affected edge is **recomputed from the `v_move_edge` view** (MySQL's derived-condition pushdown filters the grouped view by its grouping columns). Edges that no longer exist are deleted, and so are nodes left with no edges.
+4. All Neo4j writes run in one Neo4j transaction; then the outbox rows are marked `processed_at` and the MySQL transaction commits.
+
+If Neo4j fails, MySQL rolls back and the rows stay pending. If MySQL fails after Neo4j committed, the rows are replayed, and replay is harmless because edges are *recomputed*, not incremented (idempotent, at-least-once). `mode=rebuild` wipes the graph and reloads it from `v_move_edge`, which the integration tests prove produces exactly the incrementally maintained graph.
+
+`v_move_edge` (same migration) is the single definition of an edge used by both the relay and the rebuild.
+
+### Important Cypher queries
+
+```cypher
+// Transpositions: boards entered from >= 2 different boards
+MATCH (p:Position) WHERE COUNT { (p)<-[:MOVE]-() } >= 2
+MATCH (prev:Position)-[m:MOVE]->(p)
+WITH p, collect({from: prev.position_id, san: m.san, games: m.games}) AS incoming
+RETURN p.position_id, size(incoming) AS routes, incoming ORDER BY routes DESC
+
+// Every minimal move order from the initial board; which games played each one in full
+MATCH (s:Position {is_start: true}), (t:Position {position_id: $id})
+MATCH p = allShortestPaths((s)-[:MOVE*..500]->(t))
+WITH p, relationships(p) AS rs
+RETURN [r IN rs | r.san] AS moves,
+       reduce(acc = head(rs).game_ids, r IN tail(rs) | [g IN acc WHERE g IN r.game_ids]) AS played_by
+
+// Opening tree: continuations within N plies, pruned by popularity
+MATCH p = (:Position {position_id: $id})-[:MOVE*1..3]->()
+WHERE all(r IN relationships(p) WHERE r.games >= $min_games)
+UNWIND relationships(p) AS r
+RETURN DISTINCT startNode(r).position_id, r.san, r.games, endNode(r).position_id
+```
+
+Novelty detection reads the game's ply order from MySQL and the per-edge popularity from Neo4j in one request: the first move whose edge contains no other game is the novelty, and the other edges leaving that board are the "theory" alternatives.
+
+Equivalent SQL for move orders would need a recursive CTE walking `ply` from the start board, carrying the path as a string and de-duplicating per depth for every request. The graph answers it from stored adjacency.
 
 ## Transaction examples
 
