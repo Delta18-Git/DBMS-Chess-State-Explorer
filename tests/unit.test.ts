@@ -7,7 +7,7 @@ import { Chess, DEFAULT_POSITION } from "chess.js";
 import { canonicalFen, legalSan, parseGame } from "../src/lib/chess";
 import { hashPassword, newToken, tokenHash, verifyPassword } from "../src/lib/auth";
 import { ApiError, body, errorResponse, pagination } from "../src/lib/http";
-import { gameSchema, playerSchema, tournamentSchema } from "../src/lib/validation";
+import { booleanQuery, gameSchema, playerSchema, tournamentSchema } from "../src/lib/validation";
 
 test("canonical FEN is case sensitive, ignores clocks and irrelevant en-passant targets", () => {
   assert.equal(canonicalFen(DEFAULT_POSITION.replace("0 1", "14 21")), DEFAULT_POSITION);
@@ -174,4 +174,22 @@ test("failed rollback destroys the connection without masking the original error
     assert.ok(destroyed);
     assert.ok(released);
   } finally { globalDb.chessPool = previous; }
+});
+
+test("full-text search input becomes a safe BOOLEAN MODE query", () => {
+  assert.equal(booleanQuery("sicilian najdorf"), "+sicilian* +najdorf*");
+  assert.equal(booleanQuery('Carlsen" -(>~*@'), "+Carlsen*");
+  assert.equal(booleanQuery("Réti   opening"), "+Réti* +opening*");
+  assert.equal(booleanQuery("a b c d e f g h i j kk ll mm nn oo pp qq rr"), "+kk* +ll* +mm* +nn* +oo* +pp* +qq* +rr*");
+  assert.throws(() => booleanQuery("- + * ~"), ApiError);
+});
+
+test("graph migration keeps the outbox transactional and the edge view shared", async () => {
+  const outbox = await readFile(new URL("../database/migrations/001_graph_outbox.sql", import.meta.url), "utf8");
+  assert.match(outbox, /AFTER INSERT ON game FOR EACH ROW\s+INSERT INTO graph_outbox/);
+  assert.match(outbox, /AFTER DELETE ON game FOR EACH ROW\s+INSERT INTO graph_outbox/);
+  assert.doesNotMatch(outbox, /REFERENCES game/, "DELETE events must outlive the game row");
+  const sync = await readFile(new URL("../src/lib/graph-sync.ts", import.meta.url), "utf8");
+  assert.match(sync, /FOR UPDATE SKIP LOCKED/);
+  assert.match(sync, /FROM v_move_edge/);
 });
