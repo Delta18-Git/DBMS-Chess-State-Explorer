@@ -19,7 +19,7 @@ Base path: `/api`. Node.js runtime; JSON requests and responses. No API version 
 | --- | --- |
 | 400 | Invalid JSON/UTF-8, input, FEN/PGN/SAN, or database CHECK violation |
 | 401 | Missing/invalid/expired bearer token or wrong login credentials |
-| 403 | Authenticated but not admin |
+| 403 | Authenticated but not allowed (admin required, or not the owner of a repertoire) |
 | 404 | Resource not found |
 | 409 | Duplicate key, referenced resource, or concurrent lock conflict (retry) |
 | 413 / 415 | Body too large / unsupported content type |
@@ -47,7 +47,7 @@ Returns `{ data: { user_id, email, role } }`.
 
 No body required. Revokes only the supplied token; returns `{ data: { logged_out: true } }`.
 
-No public registration or role-change endpoint. Provision trusted accounts with `npm run user:create`.
+No public registration. Admins manage accounts through `/users` (below); `npm run setup` creates the first admin and analyst.
 
 ## Players, tournaments, openings
 
@@ -133,7 +133,7 @@ Explicitly deletes plies, then the game, in one transaction. Shared positions, e
 | Endpoint | Behavior |
 | --- | --- |
 | `GET /evaluations?position_id=...` | Paginated evaluation history, newest ID first |
-| `POST /evaluations` | `{ "position_id": 1, "cp": 35, "depth": 20 }` |
+| `POST /evaluations` | `{ "position_id": 1, "cp": 35, "depth": 20, "mate": null, "best_move_san": "Nf3" }` (cp or mate, not both) |
 | `DELETE /evaluations/:id` | Remove an evaluation; trigger retains its snapshot |
 | `GET /evaluations/audit` | Paginated JSON snapshots, newest audit ID first |
 
@@ -144,9 +144,10 @@ Explicitly deletes plies, then the game, in one transaction. Shared positions, e
 | Endpoint | Body / response |
 | --- | --- |
 | `GET /repertoires?player_id=...` | Paginated repertoires, player names and line counts |
-| `POST /repertoires` | `{ "player_id": 3, "name": "White repertoire" }` |
-| `GET /repertoires/:id` | Repertoire and its `lines`, including start FENs |
-| `PATCH /repertoires/:id` | `{ "name": "Updated repertoire" }` |
+| `POST /repertoires` | **Any signed-in user.** `{ "player_id": 3, "name": "White repertoire", "color": "w" }`; owned by the caller |
+| `GET /repertoires/:id` | Repertoire, `can_edit`, its `lines` (start FEN, `line`/`opening` from the graph, `followed`/`deviated` counts) and `deviations` (games where the player reached a prepared board and played something else) |
+| `POST /repertoires/:id/build` | **Owner or admin.** `{ "moves": 10, "min_games": 1 }`: adds the player's most frequent move at each of their turns (INSERT … SELECT); boards that already have a move are kept |
+| `PATCH /repertoires/:id` | **Owner or admin.** `{ "name": "Updated repertoire" }` |
 | `DELETE /repertoires/:id` | Delete lines then repertoire atomically |
 | `POST /repertoires/:id/lines` | `{ "start_position_id": 1, "move_san": "e4" }` |
 | `DELETE /repertoires/:id/lines/:lineId` | Delete exactly this parent's line |
@@ -188,14 +189,40 @@ Graph model: `(:Position {position_id, fen, side, is_start})-[:MOVE {san, games,
 | Endpoint | Behavior |
 | --- | --- |
 | `GET /graph/stats` | `{ mysql: { positions, move_edges, pending_changes, last_synced_at }, graph: { nodes, edges, transpositions, branch_points } }`. `pending_changes` is the replication lag (unprocessed outbox rows). |
-| `GET /graph/transpositions?limit&offset` | Boards with in-degree ≥ 2: `{ position_id, fen, routes, games, incoming: [{ from_position_id, from_fen, san, games }] }`, most routes first. |
+| `GET /graph/transpositions?eco&min_games&min_routes&max_ply&sort=games\|routes\|early&limit&offset` | Boards labelled `:Transposition`: `{ position_id, fen, name, line, eco, opening, ply, routes, games, incoming: [{ from_position_id, from_name, san, games }], orders: [{ moves, played_by }], total_rows }`. |
 | `GET /graph/positions/:id/paths?limit=50` | Every minimal-length move order from the initial board (`allShortestPaths`). Each path: `depth`, `moves` (SAN), `position_ids`, `edge_games`, `played_by` (games that played the whole order; empty = assembled from different games). Also `in_graph`, `move_orders`, `unplayed_orders`, `is_transposition`. 404 if the position does not exist in MySQL. |
-| `GET /graph/positions/:id/tree?depth=2&min_games=1` | Continuations within `depth` plies (1–4) whose edges were played in ≥ `min_games` games: `edges` (from/to ids, `to_fen`, san, games, results), `branch_points`, `max_branching`, `truncated` (400-edge cap). |
+| `GET /graph/positions/:id/tree?depth=2&min_games=1` | Continuations within `depth` plies (1–6) whose edges were played in ≥ `min_games` games: `edges` (from/to ids, `to_fen`, san, games, results), `nodes` (facts for drawing: side, ply, line, name, opening, in/out degree), `branch_points`, `max_branching`, `truncated` (300-edge cap). The paths endpoint also returns `nodes`. |
+| `GET /graph/players/:id/tree?color=w&depth=10` | A player's own opening graph: edges restricted to their games with that colour, with `wins`/`draws`/`losses` from their point of view, plus `nodes`. |
 | `GET /graph/games/:id/novelty` | Walks the game's plies (order from MySQL) over the graph. `novelty` = first ply whose edge no other stored game used: `{ ply_no, san, from_position_id, from_fen, book_plies, alternatives: [{ san, games }], reference_games }`; `null` if every move is shared. `plies` gives per-move popularity. If the game is still in the outbox, returns `synced: false` instead of a guess. |
 | `POST /graph/sync?mode=drain` | **Admin.** Applies up to 200 pending outbox rows: `{ processed, games, edges_upserted, edges_removed }`. Idempotent; call repeatedly until `processed` is 0. |
 | `POST /graph/sync?mode=rebuild` | **Admin.** Wipes and rebuilds the graph from `v_move_edge`, absorbing pending outbox rows: `{ edges, outbox_cleared }`. |
 
 The web UI calls `drain` automatically after importing or deleting a game. If Neo4j is down at that moment the game still commits and the change waits in the outbox.
+
+## Lists, filters and pagination
+
+Every list accepts `limit` (1–100) and `offset`, and each row carries `total_rows` (from `COUNT(*) OVER ()`), the number of matches before paging.
+
+| Endpoint | Filters / sort |
+| --- | --- |
+| `GET /games` | `player_id`, `color` (w/b, with player), `tournament_id`, `opening_id`, `eco` (prefix, e.g. `B` or `B9`), `result`, `sort=recent\|oldest\|rating\|longest\|round`. Rows include titles, federations, ratings at the time, round, `plies`. |
+| `GET /players` | `q` (FULLTEXT on name), `title`, `federation`, `sort=rating\|name\|games\|score`; rows include games, W/D/L, points, `score_pct`. `GET /players/facets` lists titles and federations with counts. |
+| `GET /tournaments` | Rows include games, players, `avg_elo`, `decisive_pct`. `GET /tournaments/:id` adds `summary`, `standings` (points, W/D/L, rating, average opponent, `place` via `RANK()`) and `openings`. |
+| `GET /analytics/openings` | `min_games`, `eco` (prefix), `q` (name contains), `sort=games\|white\|black\|eco`; rows include `avg_moves`, `last_played`. `GET /openings/:id` adds `stats`, `players` (who plays it, per colour, with score) and `position` (the defining board). |
+| `GET /analytics/players/:id` | `summary` (stored procedure), `blunders` (with Stockfish's best move), `by_color`, `openings` per colour, `first_moves`, per-game `accuracy`. |
+| `GET /analytics/positions/:id` | `next_moves` (games, results, Stockfish eval after the move, average rating, last played, catalogue opening of the resulting board), `games` that reached the board, `opening` (catalogue name). |
+
+## Imports, engine and accounts (admin)
+
+| Endpoint | Behavior |
+| --- | --- |
+| `POST /import/lichess` | `{ "source": "<lichess.org/broadcast/… link or 8-char id>", "live": false }`. Imports every finished classical game of a Lichess broadcast in one transaction, creating/updating the tournament (dates, location, format, time control), players (FIDE id, federation, birth year, rating, title; Commons photo via Wikidata) and openings. `live: false` uses the copy cached in `data/lichess/` when present. Re-running only adds new games. Returns `{ tournament, tournament_id, imported, duplicates, failed, game_ids }`. |
+| `POST /import/pgn` | `{ "pgn": "…one or more games…", "tournament_id": null }`. Players, event and opening are read from the headers and matched or created; one transaction. |
+| `POST /openings/catalogue` | Loads the Lichess opening catalogue (`data/openings/*.tsv`): every named line's final board is stored and linked from `opening.position_id`. Idempotent. |
+| `POST /engine/analyse` | `{ "game_id" \| "tournament_id" \| "position_id", "depth": 14, "limit": 500, "rescore": false }`. Runs Stockfish 19 on boards without an evaluation (or the given board), then inserts all scores (cp or mate, depth, best move) in one transaction. Returns `{ scored, remaining, depth }`. |
+| `GET /users` | Accounts with role, lock state, repertoire count. |
+| `POST /users` | `{ "email", "display_name", "role": "admin"\|"analyst", "password" (12+) }` → scrypt hash. |
+| `DELETE /users/:id` | Not yourself, not the last admin; sessions cascade, repertoires are kept (owner set to NULL). |
 
 ## Example import
 
